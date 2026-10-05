@@ -178,6 +178,50 @@ describe("runAcpPrompt over a real ACP subprocess", () => {
 		expect(texts).toEqual(["echo:edited Assistant: one two"]);
 	});
 
+	it("starts a fresh ACP session when a tool result changes its label or error status", async () => {
+		const history = [
+			user("one"),
+			assistant("one"),
+			{
+				role: "toolResult",
+				toolCallId: "call_1",
+				toolName: "read",
+				content: [{ type: "text", text: "data" }],
+				isError: false,
+				timestamp: timestamp + 2,
+			},
+		] satisfies Message[];
+		await runAcpPrompt(transport(), history, { sessionKey: "s11" });
+		const texts: string[] = [];
+		// Same content, different tool name and error status: both are rendered,
+		// so the session's prefix no longer matches.
+		await runAcpPrompt(
+			transport(),
+			[
+				history[0] as Message,
+				history[1] as Message,
+				{
+					role: "toolResult",
+					toolCallId: "call_1",
+					toolName: "write",
+					content: [{ type: "text", text: "data" }],
+					isError: true,
+					timestamp: timestamp + 2,
+				},
+				{ role: "user", content: "two", timestamp: timestamp + 3 },
+			],
+			{
+				sessionKey: "s11",
+				onUpdate: (notification) => {
+					if (notification.update.sessionUpdate === "agent_message_chunk") {
+						texts.push(notification.update.content.type === "text" ? notification.update.content.text : "");
+					}
+				},
+			},
+		);
+		expect(texts).toEqual(["echo:one Assistant: one Tool error `write`: data two"]);
+	});
+
 	it("shares one process across concurrent first calls", async () => {
 		const log = join(tmpdir(), `acp-spawn-${process.pid}-${Date.now()}.log`);
 		const acpTransport = transport({ ACP_FAKE_SLOW_INIT_MS: "80", ACP_FAKE_SPAWN_LOG: log });

@@ -102,6 +102,49 @@ describe("transcriptToAcpPrompt", () => {
 		expect(blocks[2]).toEqual({ type: "text", text: "Continue" });
 	});
 
+	it("keeps tool-result parts in source order", () => {
+		const messages: Message[] = [
+			{
+				role: "toolResult",
+				toolCallId: "call_1",
+				toolName: "screenshot",
+				content: [
+					{ type: "text", text: "before" },
+					{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+					{ type: "text", text: "after" },
+				],
+				isError: false,
+				timestamp,
+			},
+		];
+		// The label goes on the first text, and the image stays between the texts.
+		expect(transcriptToAcpPrompt(messages)).toEqual([
+			{ type: "text", text: "Tool result `screenshot`: before" },
+			{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+			{ type: "text", text: "after" },
+		]);
+	});
+
+	it("labels an image-only tool result and notes a filtered image", () => {
+		const messages: Message[] = [
+			{
+				role: "toolResult",
+				toolCallId: "call_1",
+				toolName: "shot",
+				content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+				isError: true,
+				timestamp,
+			},
+		];
+		expect(transcriptToAcpPrompt(messages)).toEqual([
+			{ type: "text", text: "Tool error `shot`:" },
+			{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+		]);
+		expect(transcriptToAcpPrompt(messages, { supportsImages: false })).toEqual([
+			{ type: "text", text: "Tool error `shot`: (image omitted: model does not accept images)" },
+		]);
+	});
+
 	it("keeps assistant thinking and tool-result images in replayed history", () => {
 		const messages: Message[] = [
 			{

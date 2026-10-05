@@ -32,17 +32,34 @@ function assistantText(message: Extract<Message, { role: "assistant" }>): string
  */
 function toolResultBlocks(message: Extract<Message, { role: "toolResult" }>, supportsImages: boolean): ContentBlock[] {
 	const label = message.isError ? "Tool error" : "Tool result";
-	const blocks: ContentBlock[] = [];
-	const text = contentText(message.content);
+	const prefix = `${label} \`${message.toolName}\`: `;
 	const parts = typeof message.content === "string" ? [] : message.content;
 	const hasImages = parts.some((part) => part.type === "image");
-	if (text.length > 0 || hasImages) {
-		const note = hasImages && !supportsImages ? " (image omitted: model does not accept images)" : "";
-		blocks.push({ type: "text", text: `${label} \`${message.toolName}\`: ${text}${note}`.trimEnd() });
-	}
-	if (!supportsImages) return blocks;
+	const note = hasImages && !supportsImages ? " (image omitted: model does not accept images)" : "";
+	const blocks: ContentBlock[] = [];
+	let labelled = false;
+	// Source order matters: an image stays between the text it belongs to, and
+	// the tool label is attached to the first text (or emitted on its own).
 	for (const part of parts) {
-		if (part.type === "image") blocks.push({ type: "image", data: part.data, mimeType: part.mimeType });
+		if (part.type === "text") {
+			const text = `${labelled ? "" : prefix}${part.text}`;
+			if (text.trim().length === 0) continue;
+			blocks.push({ type: "text", text });
+			labelled = true;
+			continue;
+		}
+		if (!labelled) {
+			blocks.push({ type: "text", text: prefix.trimEnd() });
+			labelled = true;
+		}
+		if (supportsImages) blocks.push({ type: "image", data: part.data, mimeType: part.mimeType });
+	}
+	if (!labelled) {
+		blocks.push({ type: "text", text: `${prefix}${contentText(message.content)}${note}`.trimEnd() });
+	} else if (note.length > 0) {
+		const last = blocks[blocks.length - 1];
+		if (last?.type === "text") blocks[blocks.length - 1] = { type: "text", text: `${last.text}${note}` };
+		else blocks.push({ type: "text", text: note.trim() });
 	}
 	return blocks;
 }

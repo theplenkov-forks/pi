@@ -28,6 +28,8 @@ describe("ACP transport config", () => {
 		expect(formatAcpCommand({ command: "devin", args: ["acp", "--model", "swe-2"] })).toBe("devin … --model …");
 		// Argument values can carry secrets, so only flag names survive.
 		expect(formatAcpCommand({ command: "agent", args: ["--token", "sk-secret"] })).toBe("agent --token …");
+		// `--token=value` carries the secret inline.
+		expect(formatAcpCommand({ command: "agent", args: ["--token=sk-secret"] })).toBe("agent --token=…");
 		expect(formatAcpCommand({ command: "agent" })).toBe("agent");
 		expect(acpBaseUrl("devin")).toBe("acp://devin");
 		expect(ACP_API).toBe("acp");

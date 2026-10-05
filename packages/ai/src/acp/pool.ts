@@ -139,10 +139,10 @@ function throwIfAborted(signal?: AbortSignal): void {
 
 /**
  * Fingerprint of the first `count` transcript messages. Hashes role, timestamp,
- * and content: an edited message can keep the same role, timestamp, and length
- * (`"hello"` -> `"world"`), so content has to be part of the identity. Message
- * objects are rebuilt by some `convertToLlm` implementations, hence a value
- * hash rather than object identity.
+ * content, and the tool-result fields the converter renders (tool name, error
+ * status): an edit can keep the same role, timestamp, and length
+ * (`"hello"` -> `"world"`). Message objects are rebuilt by some `convertToLlm`
+ * implementations, hence a value hash rather than object identity.
  */
 function sentPrefixFingerprint(messages: readonly Message[], count: number): string {
 	// FNV-1a: cheap, allocation-light, and only needs to detect changes.
@@ -157,6 +157,9 @@ function sentPrefixFingerprint(messages: readonly Message[], count: number): str
 		const message = messages[index];
 		mix(`${index}|${message?.role ?? "?"}|${message?.timestamp ?? 0}|`);
 		if (message) mix(JSON.stringify(message.content) ?? "");
+		// Fields the converter renders outside `content` are replay-relevant too:
+		// a tool result keeps its label and error status.
+		if (message?.role === "toolResult") mix(`${message.toolName}|${message.isError ? 1 : 0}`);
 		mix(";");
 	}
 	return `${count}:${(hash >>> 0).toString(16)}`;

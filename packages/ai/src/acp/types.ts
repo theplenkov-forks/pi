@@ -37,6 +37,11 @@ export function resolveAcpTransport(
  * secrets. Never parses or executes.
  */
 export function formatAcpCommand(transport: AcpTransportConfig): string {
-	const args = (transport.args ?? []).map((arg) => (arg.startsWith("-") ? arg : "…"));
+	const args = (transport.args ?? []).map((arg) => {
+		if (!arg.startsWith("-")) return "…";
+		// `--token=value` carries the secret inline.
+		const equals = arg.indexOf("=");
+		return equals < 0 ? arg : `${arg.slice(0, equals)}=…`;
+	});
 	return [transport.command, ...args].join(" ");
 }

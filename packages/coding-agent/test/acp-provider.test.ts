@@ -207,6 +207,21 @@ describe("ACP models.json support", () => {
 		).toBeUndefined();
 	});
 
+	it("applies provider command and env to inherited builtin models", async () => {
+		const config = await loadConfig({
+			providers: { devin: { command: "devin-nightly", env: { DEVIN_PROFILE: "night" } } },
+		});
+		const model = composeModelProvider("devin", devinProvider(), config, undefined)
+			.getModels()
+			.find((entry) => entry.id === "swe-2");
+		expect(model?.acp).toEqual({
+			command: "devin-nightly",
+			// The per-model variant selector is preserved.
+			args: ["acp", "--model", "swe-2"],
+			env: { DEVIN_PROFILE: "night" },
+		});
+	});
+
 	it("rejects include/exclude on non-ACP providers", async () => {
 		const config = await loadConfig({
 			providers: {

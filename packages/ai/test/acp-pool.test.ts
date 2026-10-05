@@ -19,6 +19,11 @@ function user(text: string): Message {
 	return { role: "user", content: text, timestamp };
 }
 
+/** Same shape, different identity: models that rebuild messages must not diverge. */
+function rebuilt(messages: readonly Message[]): Message[] {
+	return messages.map((message) => ({ ...message }));
+}
+
 /** Minimal assistant message so transcript deltas look like real pi history. */
 function assistant(text: string): Message {
 	return {
@@ -106,6 +111,23 @@ describe("runAcpPrompt over a real ACP subprocess", () => {
 		expect(texts).toEqual(["echo:Tool result `read`: data two"]);
 	});
 
+	it("keeps the session when the transcript is rebuilt with new message objects", async () => {
+		const history = [user("one"), assistant("one")];
+		await runAcpPrompt(transport(), history, { sessionKey: "s9" });
+		const texts: string[] = [];
+		// Same history, rebuilt objects (a custom convertToLlm may do this): the
+		// fingerprint matches, so only the new user message is sent.
+		await runAcpPrompt(transport(), [...rebuilt(history), user("two")], {
+			sessionKey: "s9",
+			onUpdate: (notification) => {
+				if (notification.update.sessionUpdate === "agent_message_chunk") {
+					texts.push(notification.update.content.type === "text" ? notification.update.content.text : "");
+				}
+			},
+		});
+		expect(texts).toEqual(["echo:two"]);
+	});
+
 	it("starts a fresh ACP session when the transcript rewinds", async () => {
 		await runAcpPrompt(transport(), [user("one"), assistant("one")], { sessionKey: "s4" });
 		const texts: string[] = [];
@@ -134,6 +156,26 @@ describe("runAcpPrompt over a real ACP subprocess", () => {
 		});
 		// A fresh ACP session has no memory, so the new prompt and all history replay.
 		expect(texts).toEqual(["echo:second one Assistant: one two"]);
+	});
+
+	it("starts a fresh ACP session when earlier history is replaced while the transcript grows", async () => {
+		await runAcpPrompt(transport(), [user("one"), assistant("one")], { sessionKey: "s8" });
+		const texts: string[] = [];
+		// The first user message was edited and the transcript then grew past the
+		// sent boundary: the session's prefix no longer matches what pi holds.
+		await runAcpPrompt(
+			transport(),
+			[user("edited"), assistant("one"), { role: "user", content: "two", timestamp: timestamp + 1 }],
+			{
+				sessionKey: "s8",
+				onUpdate: (notification) => {
+					if (notification.update.sessionUpdate === "agent_message_chunk") {
+						texts.push(notification.update.content.type === "text" ? notification.update.content.text : "");
+					}
+				},
+			},
+		);
+		expect(texts).toEqual(["echo:edited Assistant: one two"]);
 	});
 
 	it("shares one process across concurrent first calls", async () => {

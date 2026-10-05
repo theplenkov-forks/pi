@@ -58,11 +58,13 @@ interface PooledSession {
 	/** Transcript messages already accepted by the agent. */
 	sentCount: number;
 	/**
-	 * Identity of the last message counted in `sentCount`. A transcript branch
-	 * or edit can keep the same length while changing history, so identity —
-	 * not length — decides whether the ACP session still matches.
+	 * Fingerprint of the sent prefix. A branch or edit can change earlier history
+	 * while the transcript grows, so the sent prefix itself — not just its
+	 * length — decides whether the ACP session still matches. Message objects are
+	 * rebuilt by some `convertToLlm` implementations, hence a value fingerprint
+	 * over stable fields rather than object identity.
 	 */
-	lastSent?: Message;
+	sentFingerprint: string;
 	/** System prompt the session was created with. */
 	systemPrompt?: string;
 	consumed: ConsumedTotals;
@@ -73,8 +75,12 @@ interface PooledConnection {
 	connection: acp.ClientConnection;
 	sessions: Map<string, PooledSession>;
 	activeTurns: number;
-	/** Signal of the turn currently running on this connection, if any. */
-	turnSignal?: AbortSignal;
+	/**
+	 * Signal of each turn currently running on this connection, keyed by ACP
+	 * session id. Sessions share a connection, so a single slot would let one
+	 * turn's abort leak into another's permission requests.
+	 */
+	turnSignals: Map<string, AbortSignal>;
 }
 
 const pool = new Map<string, PooledConnection>();
@@ -131,6 +137,22 @@ function throwIfAborted(signal?: AbortSignal): void {
 	signal?.throwIfAborted();
 }
 
+/**
+ * Fingerprint of the first `count` transcript messages. Role, timestamp, and
+ * content size survive message conversion and change when a message is edited
+ * or replaced, so they identify the prefix the agent has already seen.
+ */
+function sentPrefixFingerprint(messages: readonly Message[], count: number): string {
+	let fingerprint = "";
+	for (let index = 0; index < count; index++) {
+		const message = messages[index];
+		const content = message?.content;
+		const size = typeof content === "string" ? content.length : (content?.length ?? 0);
+		fingerprint += `${index}:${message?.role ?? "?"}:${message?.timestamp ?? 0}:${size};`;
+	}
+	return fingerprint;
+}
+
 async function readTextFileContent(path: string): Promise<string> {
 	return readFile(resolve(path), "utf-8");
 }
@@ -139,6 +161,22 @@ async function writeTextFileContent(path: string, content: string): Promise<void
 	const resolved = resolve(path);
 	await mkdir(dirname(resolved), { recursive: true });
 	await writeFile(resolved, content, "utf-8");
+}
+
+/**
+ * Windows `.cmd`/`.bat` files are not executable images: Node refuses to launch
+ * them without a command interpreter. Run those through `cmd.exe` explicitly
+ * (with every argument quoted) instead of silently failing with EINVAL.
+ */
+function spawnInvocation(binary: string, args: readonly string[]): { command: string; args: string[] } {
+	const quoted = (value: string) => (/[\s"^&|<>]/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value);
+	if (process.platform !== "win32" || !/\.(cmd|bat)$/i.test(binary)) {
+		return { command: binary, args: [...args] };
+	}
+	return {
+		command: process.env.ComSpec ?? "cmd.exe",
+		args: ["/d", "/s", "/c", [binary, ...args].map(quoted).join(" ")],
+	};
 }
 
 async function establishTransport(
@@ -162,12 +200,16 @@ async function establishTransport(
 			: typeof transport.env?.PATH === "string"
 				? transport.env.PATH
 				: undefined;
-	if (!resolveAcpBinary(transport.command, searchPath)) {
+	// Spawn the resolved binary, not the configured name: that is the same path
+	// auth validated, and it is the only way a bare name or a PATHEXT shim works.
+	const binary = resolveAcpBinary(transport.command, searchPath);
+	if (!binary) {
 		throw new Error(
 			`ACP agent "${label}" not found: no executable "${acpCommandName(transport.command)}" on PATH. Install it or fix the provider "command".`,
 		);
 	}
-	const proc = spawn(transport.command, transport.args ?? [], {
+	const { command: spawnCommand, args: spawnArgs } = spawnInvocation(binary, transport.args ?? []);
+	const proc = spawn(spawnCommand, spawnArgs, {
 		stdio: ["pipe", "pipe", "pipe"],
 		env: { ...process.env, ...transport.env, ...options.env },
 		cwd: options.cwd ?? process.cwd(),
@@ -197,7 +239,8 @@ async function establishTransport(
 			// Consult the running turn's signal, not the one captured when the
 			// process was spawned: an earlier turn's abort must not cancel
 			// permission requests for later turns on the same connection.
-			if (ctx.signal.aborted || current?.turnSignal?.aborted) return { outcome: { outcome: "cancelled" } };
+			if (ctx.signal.aborted || current?.turnSignals.get(ctx.params.sessionId)?.aborted)
+				return { outcome: { outcome: "cancelled" } };
 			const choices = ctx.params.options;
 			const pick =
 				choices.find((option) => option.kind === "allow_once") ??
@@ -229,7 +272,7 @@ async function establishTransport(
 	const webInput = Writable.toWeb(proc.stdin);
 	const webOutput = Readable.toWeb(proc.stdout) as ReadableStream<Uint8Array>;
 	const connection = app.connect(acp.ndJsonStream(webInput, webOutput));
-	const entry: PooledConnection = { proc, connection, sessions: new Map(), activeTurns: 0 };
+	const entry: PooledConnection = { proc, connection, sessions: new Map(), activeTurns: 0, turnSignals: new Map() };
 	current = entry;
 	ensureExitHook();
 	// Connections start referenced; each finished turn unrefs while idle.
@@ -424,15 +467,16 @@ async function runTurn(
 
 	const systemPrompt = options.systemPrompt?.trim() || undefined;
 	let state = entry.sessions.get(sessionKey);
-	// A shorter transcript is a rewind (compaction, restore); a same-length
-	// transcript whose last sent message changed is a branch or an edit. A
-	// changed system prompt also invalidates what the agent was told. All three
-	// leave the ACP session's context stale.
+	// A shorter transcript is a rewind (compaction, restore). A longer one may
+	// still have replaced earlier history — a branch or an edit keeps growing the
+	// transcript, so compare the sent prefix itself. A changed system prompt also
+	// invalidates what the agent was told. All of these leave the ACP session's
+	// context stale.
 	const diverged =
 		state !== undefined &&
 		state.sentCount > 0 &&
 		(messages.length < state.sentCount ||
-			(messages.length === state.sentCount && messages[state.sentCount - 1] !== state.lastSent) ||
+			sentPrefixFingerprint(messages, state.sentCount) !== state.sentFingerprint ||
 			(systemPrompt !== undefined && systemPrompt !== state.systemPrompt));
 	if (diverged && state) {
 		retireSession(entry, sessionKey, state);
@@ -444,6 +488,7 @@ async function runTurn(
 			state = {
 				session: await startSession(entry, options),
 				sentCount: 0,
+				sentFingerprint: "",
 				systemPrompt,
 				consumed: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
 			};
@@ -479,8 +524,9 @@ async function runTurn(
 	// Advance only after the agent accepts the turn: on a failed prompt or a
 	// cancellation the next turn must still carry these messages.
 	const previousSentCount = state.sentCount;
+	const previousFingerprint = state.sentFingerprint;
 	state.sentCount = messages.length;
-	state.lastSent = messages[state.sentCount - 1];
+	state.sentFingerprint = sentPrefixFingerprint(messages, messages.length);
 
 	const active = state.session;
 	const cancelListener = () => {
@@ -493,7 +539,7 @@ async function runTurn(
 	// attached so a later rejection never surfaces as an unhandled rejection.
 	responsePromise.catch(() => {});
 	cancellationSignal?.addEventListener("abort", cancelListener, { once: true });
-	entry.turnSignal = cancellationSignal;
+	if (cancellationSignal) entry.turnSignals.set(active.sessionId, cancellationSignal);
 	let latestCost: number | undefined;
 	try {
 		for (;;) {
@@ -524,10 +570,10 @@ async function runTurn(
 		await responsePromise.catch(() => {});
 		// Resend on the next turn: the rejected blocks were never accepted.
 		state.sentCount = previousSentCount;
-		state.lastSent = messages[previousSentCount - 1];
+		state.sentFingerprint = previousFingerprint;
 		throw new Error(`ACP agent "${label}" prompt failed: ${error instanceof Error ? error.message : error}`);
 	} finally {
-		entry.turnSignal = undefined;
+		if (entry.turnSignals.get(active.sessionId) === cancellationSignal) entry.turnSignals.delete(active.sessionId);
 		cancellationSignal?.removeEventListener("abort", cancelListener);
 		if (ephemeral) retireSession(entry, sessionKey, state);
 	}

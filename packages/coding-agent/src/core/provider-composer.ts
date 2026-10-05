@@ -390,9 +390,25 @@ function applyModelsJson(
 
 	const models: AnyModel[] = baseModels.map((model) => {
 		const baseUrl = config.oauth === "radius" ? model.baseUrl : (config.baseUrl ?? model.baseUrl);
-		return isModelType(model, "chat")
-			? { ...model, baseUrl, compat: mergeCompat(model.compat, config.compat) }
-			: { ...model, baseUrl };
+		if (!isModelType(model, "chat")) return { ...model, baseUrl };
+		// Provider-level ACP settings apply to inherited models too, otherwise a
+		// `command`/`env` override on a builtin provider would only affect models
+		// the entry re-declares. `args` stay per model: they select the variant.
+		const acp =
+			model.api === "acp" && (config.command !== undefined || config.env !== undefined)
+				? resolveAcpTransport(
+						{ ...model.acp, env: { ...model.acp?.env, ...config.env } },
+						{
+							command: config.command,
+						},
+					)
+				: model.acp;
+		return {
+			...model,
+			baseUrl,
+			compat: mergeCompat(model.compat, config.compat),
+			...(acp ? { acp } : {}),
+		};
 	});
 	for (const definition of config.models ?? []) {
 		const existingIndex = models.findIndex((model) => isModelType(model, "chat") && model.id === definition.id);

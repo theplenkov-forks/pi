@@ -12,6 +12,7 @@
 - Fixed ACP providers in `models.json` losing their command transport when a model entry omits `api`, ignoring provider-level `args`/`env` that layer over a builtin transport, rejecting `include`/`exclude`-only entries, and allowing a model-level `command` to bypass the `oauth` restriction
 - Fixed the packaged `rpc-entry` not registering the ACP subprocess modules, so ACP providers could not stream over RPC
 - Fixed ACP auth ignoring a configured transport `env.PATH` and treating a directory as an executable, so providers reachable only through configured env were reported as unconfigured
+- Fixed provider-level ACP `command`/`env` in `models.json` not applying to inherited builtin models, so an override only affected models the entry re-declared
 
 ## [1.0.3] - 2026-10-05
 

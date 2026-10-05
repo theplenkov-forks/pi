@@ -22,6 +22,28 @@ describe("transcriptToAcpPrompt", () => {
 		expect(transcriptToAcpPrompt(messages)).toEqual([{ type: "text", text: "Hello" }]);
 	});
 
+	it("keeps interleaved text and image parts in order", () => {
+		const messages: Message[] = [
+			{
+				role: "user",
+				content: [
+					{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+					{ type: "text", text: "before" },
+					{ type: "text", text: " after" },
+					{ type: "image", data: "d29ybGQ=", mimeType: "image/jpeg" },
+					{ type: "text", text: "tail" },
+				],
+				timestamp,
+			},
+		];
+		expect(transcriptToAcpPrompt(messages)).toEqual([
+			{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+			{ type: "text", text: "before after" },
+			{ type: "image", data: "d29ybGQ=", mimeType: "image/jpeg" },
+			{ type: "text", text: "tail" },
+		]);
+	});
+
 	it("splits image parts into image blocks after the message text", () => {
 		const messages: Message[] = [
 			{

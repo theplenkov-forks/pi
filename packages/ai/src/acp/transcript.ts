@@ -48,14 +48,20 @@ export function transcriptToAcpPrompt(
 				if (message.content.trim().length > 0) blocks.push({ type: "text", text: message.content });
 				continue;
 			}
+			// Preserve part order: adjacent text parts merge, images stay in place.
 			let text = "";
-			const images: ContentBlock[] = [];
 			for (const block of message.content) {
-				if (block.type === "text") text += block.text;
-				else images.push({ type: "image", data: block.data, mimeType: block.mimeType });
+				if (block.type === "text") {
+					text += block.text;
+					continue;
+				}
+				if (text.trim().length > 0) {
+					blocks.push({ type: "text", text });
+					text = "";
+				}
+				blocks.push({ type: "image", data: block.data, mimeType: block.mimeType });
 			}
 			if (text.trim().length > 0) blocks.push({ type: "text", text });
-			blocks.push(...images);
 			continue;
 		}
 		if (message.role === "assistant") {

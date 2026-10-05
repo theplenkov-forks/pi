@@ -19,7 +19,7 @@ export interface AcpTransportConfig {
 
 /** Merge model-level overrides over provider-level defaults. */
 export function resolveAcpTransport(
-	provider: AcpTransportConfig | undefined,
+	provider: ModelAcpTransport | undefined,
 	model: ModelAcpTransport | undefined,
 ): AcpTransportConfig | undefined {
 	const command = model?.command ?? provider?.command;

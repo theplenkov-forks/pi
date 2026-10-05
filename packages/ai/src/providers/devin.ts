@@ -3,7 +3,7 @@ import { fetchAcpSessionInfo } from "../acp/api.lazy.ts";
 import { createAcpProvider } from "../acp/provider.ts";
 import type { Provider, RefreshModelsContext } from "../models.ts";
 import type { Model } from "../types.ts";
-import { DEVIN_ACP_ARGS, DEVIN_BASELINE_MODELS, DEVIN_COMMAND } from "./devin.models.ts";
+import { DEVIN_ACP_ARGS, DEVIN_BASELINE_MODELS, DEVIN_COMMAND } from "./devin-catalog.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;

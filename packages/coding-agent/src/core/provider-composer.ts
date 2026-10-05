@@ -13,6 +13,7 @@ import {
 	isModelType,
 	lazyStream,
 	type Model,
+	type ModelAcpTransport,
 	type ModelAuth,
 	type OAuthAuth,
 	type OAuthCredentials,
@@ -260,7 +261,7 @@ function modelFromJson(
 		samplingParamsByThinkingLevel: definition.samplingParamsByThinkingLevel,
 		headers: undefined,
 		compat: mergeCompat(providerConfig.compat, definition.compat),
-		...acpTransportFromJson(providerId, definition, providerConfig, defaults?.acp),
+		...acpTransportFromJson(providerId, definition, providerConfig, defaults),
 	};
 }
 
@@ -268,9 +269,11 @@ function acpTransportFromJson(
 	providerId: string,
 	definition: ModelsJsonModel,
 	providerConfig: ModelsJsonProvider,
-	baseAcp: Model<Api>["acp"],
+	defaults: Model<Api> | undefined,
 ): { acp?: Model<Api>["acp"] } {
-	const api = definition.api ?? providerConfig.api;
+	// `defaults` is the matching known model, so an overlay that only renames a
+	// built-in ACP model keeps its api and command transport.
+	const api = definition.api ?? providerConfig.api ?? defaults?.api;
 	if (
 		api !== "acp" &&
 		definition.command === undefined &&
@@ -282,11 +285,13 @@ function acpTransportFromJson(
 	if (api !== "acp") {
 		throw new Error(`Provider ${providerId}, model ${definition.id}: "command"/"args"/"env" require "api": "acp".`);
 	}
-	const providerTransport = providerConfig.command
-		? { command: providerConfig.command, args: providerConfig.args, env: providerConfig.env }
-		: baseAcp?.command
-			? { command: baseAcp.command, args: baseAcp.args, env: baseAcp.env }
-			: undefined;
+	// Provider-level settings layer over the known model's transport so `env`
+	// and `args` apply even when only the command comes from the builtin.
+	const providerTransport: ModelAcpTransport = {
+		command: providerConfig.command ?? defaults?.acp?.command,
+		args: providerConfig.args ?? defaults?.acp?.args,
+		env: { ...defaults?.acp?.env, ...providerConfig.env },
+	};
 	const resolved = resolveAcpTransport(providerTransport, {
 		command: definition.command,
 		args: definition.args,
@@ -368,10 +373,12 @@ function applyModelsJson(
 		!hasOverrides &&
 		!config.apiKey &&
 		!config.oauth &&
+		!config.include?.length &&
+		!config.exclude?.length &&
 		config.authHeader === undefined
 	) {
 		throw new Error(
-			`Provider ${providerId}: must specify "baseUrl", "command", "headers", "compat", "modelOverrides", or "models".`,
+			`Provider ${providerId}: must specify "baseUrl", "command", "headers", "compat", "modelOverrides", "include"/"exclude", or "models".`,
 		);
 	}
 
@@ -633,7 +640,10 @@ export function composeModelProvider(
 	extension: ProviderConfigInput | undefined,
 ): Provider {
 	const config = modelConfig.getProvider(providerId);
-	if (config?.command && config?.oauth) {
+	// Model-level commands count too: a Radius-oauth provider must not be able to
+	// route some of its models through an ACP subprocess.
+	const hasCommand = config?.command !== undefined || config?.models?.some((model) => model.command !== undefined);
+	if (hasCommand && config?.oauth) {
 		throw new Error(`Provider ${providerId}: "command" (ACP) cannot be combined with "oauth".`);
 	}
 	let extensionOAuthCredential: OAuthCredentials | undefined;
@@ -700,7 +710,7 @@ export function composeModelProvider(
 
 	const provider: Provider = {
 		id: providerId,
-		name: extension?.name ?? config?.name ?? base?.name ?? extension?.oauth?.name ?? providerId,
+		name: displayName,
 		baseUrl: extension?.baseUrl ?? config?.baseUrl ?? base?.baseUrl,
 		headers: base?.headers,
 		auth: { ...(apiKey ? { apiKey } : {}), ...(oauth ? { oauth } : {}) },

@@ -13,7 +13,7 @@ import { dirname, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import type { Message, ProviderEnv } from "../types.ts";
-import { acpCommandName, findAcpCommand } from "./auth.ts";
+import { acpCommandName, resolveAcpBinary } from "./auth.ts";
 import { transcriptToAcpPrompt } from "./transcript.ts";
 import { type AcpTransportConfig, formatAcpCommand } from "./types.ts";
 
@@ -53,7 +53,10 @@ interface ConsumedTotals {
 
 interface PooledSession {
 	session: acp.ActiveSession;
+	/** Transcript messages already accepted by the agent. */
 	sentCount: number;
+	/** System prompt the session was created with. */
+	systemPrompt?: string;
 	consumed: ConsumedTotals;
 }
 
@@ -65,6 +68,8 @@ interface PooledConnection {
 }
 
 const pool = new Map<string, PooledConnection>();
+/** In-flight spawns per transport key, so concurrent first callers share one process. */
+const connecting = new Map<string, Promise<PooledConnection>>();
 
 function setHandlesReferenced(entry: PooledConnection, referenced: boolean): void {
 	entry.proc[referenced ? "ref" : "unref"]();
@@ -126,7 +131,7 @@ async function writeTextFileContent(path: string, content: string): Promise<void
 	await writeFile(resolved, content, "utf-8");
 }
 
-async function connectTransport(
+async function establishTransport(
 	key: string,
 	transport: AcpTransportConfig,
 	options: AcpRunOptions,
@@ -145,7 +150,7 @@ async function connectTransport(
 			: typeof transport.env?.PATH === "string"
 				? transport.env.PATH
 				: undefined;
-	if (!findAcpCommand(transport.command, searchPath)) {
+	if (!resolveAcpBinary(transport.command, searchPath)) {
 		throw new Error(
 			`ACP agent "${label}" not found: no executable "${acpCommandName(transport.command)}" on PATH. Install it or fix the provider "command".`,
 		);
@@ -239,6 +244,29 @@ async function connectTransport(
 	return entry;
 }
 
+/**
+ * Return the pooled connection for a transport, spawning it at most once.
+ * Concurrent first callers await the same spawn: the pool would otherwise
+ * overwrite one live process with another and lose track of the loser.
+ */
+function connectTransport(
+	key: string,
+	transport: AcpTransportConfig,
+	options: AcpRunOptions,
+): Promise<PooledConnection> {
+	const pending = connecting.get(key);
+	if (pending) return pending;
+	const attempt = establishTransport(key, transport, options);
+	connecting.set(key, attempt);
+	// Drop the entry once settled so a failed spawn can be retried.
+	void attempt
+		.catch(() => {})
+		.then(() => {
+			if (connecting.get(key) === attempt) connecting.delete(key);
+		});
+	return attempt;
+}
+
 async function startSession(entry: PooledConnection, options: AcpRunOptions): Promise<acp.ActiveSession> {
 	const cwd = options.cwd ?? process.cwd();
 	return entry.connection.agent.buildSession(cwd).start();
@@ -261,14 +289,21 @@ export async function fetchAcpSessionInfo(
 ): Promise<AcpSessionInfo> {
 	const key = transportKey(transport, options.env);
 	const entry = await connectTransport(key, transport, options);
-	const active = await startSession(entry, options);
+	// Discovery never enters turn tracking, so bracket it explicitly: without
+	// this the pooled child stays referenced and keeps the event loop alive.
+	trackTurnStart(entry);
 	try {
-		return { configOptions: active.newSessionResponse.configOptions, modes: active.newSessionResponse.modes };
+		const active = await startSession(entry, options);
+		try {
+			return { configOptions: active.newSessionResponse.configOptions, modes: active.newSessionResponse.modes };
+		} finally {
+			active.dispose();
+			void entry.connection.agent
+				.request(acp.methods.agent.session.close, { sessionId: active.sessionId })
+				.catch(() => {});
+		}
 	} finally {
-		active.dispose();
-		void entry.connection.agent
-			.request(acp.methods.agent.session.close, { sessionId: active.sessionId })
-			.catch(() => {});
+		trackTurnEnd(entry);
 	}
 }
 
@@ -348,9 +383,11 @@ async function runTurn(
 	const sessionKey = options.sessionKey ?? `ephemeral-${Date.now()}-${Math.floor(Math.random() * 2 ** 32)}`;
 	const ephemeral = options.sessionKey === undefined;
 
+	const systemPrompt = options.systemPrompt?.trim() || undefined;
 	let state = entry.sessions.get(sessionKey);
-	if (state && messages.length < state.sentCount) {
-		// Transcript rewind (compaction, restore): drop the stale ACP session.
+	if (state && (messages.length < state.sentCount || (systemPrompt && systemPrompt !== state.systemPrompt))) {
+		// Transcript rewind (compaction, restore) or a changed system prompt:
+		// the agent's context is stale either way, so drop the session.
 		entry.sessions.delete(sessionKey);
 		state.session.dispose();
 		state = undefined;
@@ -361,6 +398,7 @@ async function runTurn(
 			state = {
 				session: await startSession(entry, options),
 				sentCount: 0,
+				systemPrompt,
 				consumed: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
 			};
 		} catch (error) {
@@ -371,7 +409,15 @@ async function runTurn(
 		entry.sessions.set(sessionKey, state);
 	}
 
-	const delta = messages.slice(state.sentCount);
+	let delta = messages.slice(state.sentCount);
+	if (state.sentCount > 0) {
+		// The ACP session already holds the agent's own previous reply, so the
+		// leading assistant messages of the delta are duplicates. Anything after
+		// them is foreign history (a mid-session model switch) and still replays.
+		let ownReplies = 0;
+		while (ownReplies < delta.length && delta[ownReplies]?.role === "assistant") ownReplies++;
+		delta = delta.slice(ownReplies);
+	}
 	let blocks =
 		options.blocks ??
 		transcriptToAcpPrompt(delta, {
@@ -379,6 +425,9 @@ async function runTurn(
 		});
 	if (blocks.length === 0) blocks = transcriptToAcpPrompt(messages);
 	if (blocks.length === 0) throw new Error(`ACP agent "${label}" received an empty prompt`);
+	// Advance only after the agent accepts the turn: on a failed prompt or a
+	// cancellation the next turn must still carry these messages.
+	const previousSentCount = state.sentCount;
 	state.sentCount = messages.length;
 
 	const active = state.session;
@@ -406,8 +455,14 @@ async function runTurn(
 		}
 	} catch (error) {
 		if (cancellationSignal?.aborted) {
+			// How much of the prompt the agent consumed is unknown, so the whole
+			// session goes: keeping it would resend on top of partial state.
+			if (entry.sessions.get(sessionKey) === state) entry.sessions.delete(sessionKey);
+			active.dispose();
 			return { stopReason: "cancelled", turnUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 		}
+		// Resend on the next turn: the rejected blocks were never accepted.
+		state.sentCount = previousSentCount;
 		throw new Error(`ACP agent "${label}" prompt failed: ${error instanceof Error ? error.message : error}`);
 	} finally {
 		cancellationSignal?.removeEventListener("abort", cancelListener);

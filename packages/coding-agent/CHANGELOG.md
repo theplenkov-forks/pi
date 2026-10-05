@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed syntax highlighting losing colors after the first line of multiline strings and comments in fenced code blocks ([#10143](https://github.com/earendil-works/pi/issues/10143))
+- Fixed ACP providers in `models.json` losing their command transport when a model entry omits `api`, ignoring provider-level `args`/`env` that layer over a builtin transport, rejecting `include`/`exclude`-only entries, and allowing a model-level `command` to bypass the `oauth` restriction
 
 ## [1.0.3] - 2026-10-05
 

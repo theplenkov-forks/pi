@@ -130,6 +130,55 @@ describe("ACP models.json support", () => {
 		).toEqual(["swe-2-high", "swe-2-max"]);
 	});
 
+	it("accepts a filter-only models.json entry for a builtin ACP provider", async () => {
+		const config = await loadConfig({ providers: { devin: { include: ["swe-2"] } } });
+		const provider = composeModelProvider("devin", devinProvider(), config, undefined);
+		const ids = provider.getModels().map((model) => model.id);
+		expect(ids.length).toBeGreaterThan(0);
+		expect(ids.every((id) => id.includes("swe-2"))).toBe(true);
+	});
+
+	it("keeps the builtin transport when an overlay omits api, and applies provider args/env", async () => {
+		const config = await loadConfig({
+			providers: {
+				devin: {
+					env: { DEVIN_PROFILE: "night" },
+					models: [{ id: "swe-2", name: "Renamed SWE-2" }],
+				},
+			},
+		});
+		const model = composeModelProvider("devin", devinProvider(), config, undefined)
+			.getModels()
+			.find((entry) => entry.id === "swe-2");
+		expect(model?.api).toBe("acp");
+		expect(model?.acp?.command).toBe("devin");
+		expect(model?.acp?.env).toMatchObject({ DEVIN_PROFILE: "night" });
+	});
+
+	it("lets provider args replace the builtin transport args", async () => {
+		const config = await loadConfig({
+			providers: { devin: { args: ["acp", "--model", "swe-2-max"], models: [{ id: "custom" }] } },
+		});
+		const model = composeModelProvider("devin", devinProvider(), config, undefined)
+			.getModels()
+			.find((entry) => entry.id === "custom");
+		expect(model?.api).toBe("acp");
+		expect(model?.acp?.args).toEqual(["acp", "--model", "swe-2-max"]);
+	});
+
+	it("rejects a model-level command on an oauth provider", async () => {
+		const config = await loadConfig({
+			providers: {
+				"my-agent": {
+					oauth: "radius",
+					baseUrl: "https://x.example",
+					models: [{ id: "default", command: "sneaky-agent" }],
+				},
+			},
+		});
+		expect(() => composeModelProvider("my-agent", undefined, config, undefined)).toThrow("cannot be combined");
+	});
+
 	it("rejects include/exclude on non-ACP providers", async () => {
 		const config = await loadConfig({
 			providers: {

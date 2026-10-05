@@ -12,12 +12,17 @@ import { accessSync, constants } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 import type { ApiKeyAuth, AuthCheck, AuthContext, AuthResult } from "../auth/types.ts";
 
+/** Binary part of a command string: `agent --flag` -> `agent`. */
+function binaryName(command: string): string {
+	const trimmed = command.trim();
+	const firstSpace = trimmed.search(/\s/);
+	return firstSpace < 0 ? trimmed : trimmed.slice(0, firstSpace);
+}
+
 /** Locate a binary on PATH. Returns the absolute path or undefined. */
 export function findAcpCommand(command: string, pathValue?: string): string | undefined {
-	const trimmed = command.trim();
-	if (!trimmed) return undefined;
-	const firstSpace = trimmed.search(/\s/);
-	const binary = firstSpace < 0 ? trimmed : trimmed.slice(0, firstSpace);
+	const binary = binaryName(command);
+	if (!binary) return undefined;
 	if (isAbsolute(binary)) return isExecutable(binary) ? binary : undefined;
 	const path = pathValue ?? process.env.PATH ?? "";
 	const extensions = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""];
@@ -42,31 +47,26 @@ function isExecutable(path: string): boolean {
 
 /** Split `argv[0]` for display without resolving. */
 export function acpCommandName(command: string): string {
-	const trimmed = command.trim();
-	const space = trimmed.search(/\s/);
-	const binary = space < 0 ? trimmed : trimmed.slice(0, space);
+	const binary = binaryName(command);
 	const base = binary.split("/").pop() ?? binary;
 	return base.split("\\").pop() ?? base;
 }
 
-function resolveBinary(
-	command: string | undefined,
-	pathValue?: string,
-): { command: string; binary: string } | undefined {
-	const trimmed = command?.trim();
-	if (!trimmed) return undefined;
-	const firstSpace = trimmed.search(/\s/);
-	const binary = firstSpace < 0 ? trimmed : trimmed.slice(0, firstSpace);
-	let resolved: string | undefined;
-	if (isAbsolute(binary)) {
-		resolved = isExecutable(binary) ? binary : undefined;
-	} else if (binary.includes("/") || binary.includes("\\")) {
+/**
+ * Resolve a configured command the way the OS will: absolute paths, paths
+ * relative to the working directory (`./tools/agent`), then PATH lookup. Shared
+ * by auth checks and the spawn path so a provider that resolves as configured
+ * can actually be started.
+ */
+export function resolveAcpBinary(command: string | undefined, pathValue?: string): string | undefined {
+	const binary = binaryName(command ?? "");
+	if (!binary) return undefined;
+	if (isAbsolute(binary)) return isExecutable(binary) ? binary : undefined;
+	if (binary.includes("/") || binary.includes("\\")) {
 		const candidate = join(process.cwd(), binary);
-		resolved = isExecutable(candidate) ? candidate : undefined;
-	} else {
-		resolved = findAcpCommand(binary, pathValue);
+		return isExecutable(candidate) ? candidate : undefined;
 	}
-	return resolved ? { command: trimmed, binary: resolved } : undefined;
+	return findAcpCommand(binary, pathValue);
 }
 
 export async function checkAcpCommand(
@@ -74,9 +74,9 @@ export async function checkAcpCommand(
 	input: { ctx: AuthContext; credential?: { env?: Record<string, string> }; signal: AbortSignal },
 ): Promise<AuthCheck | undefined> {
 	input.signal.throwIfAborted();
-	const resolved = resolveBinary(command, input.credential?.env?.PATH);
+	const resolved = resolveAcpBinary(command, input.credential?.env?.PATH);
 	if (!resolved) return undefined;
-	return { type: "api_key", source: `ACP command "${acpCommandName(resolved.binary)}"` };
+	return { type: "api_key", source: `ACP command "${acpCommandName(resolved)}"` };
 }
 
 export async function resolveAcpCommand(
@@ -88,12 +88,12 @@ export async function resolveAcpCommand(
 	},
 ): Promise<AuthResult | undefined> {
 	input.signal.throwIfAborted();
-	const resolved = resolveBinary(command, input.credential?.env?.PATH);
+	const resolved = resolveAcpBinary(command, input.credential?.env?.PATH);
 	if (!resolved) return undefined;
 	return {
 		auth: {},
 		env: input.credential?.env,
-		source: `ACP command "${acpCommandName(resolved.binary)}"`,
+		source: `ACP command "${acpCommandName(resolved)}"`,
 	};
 }
 

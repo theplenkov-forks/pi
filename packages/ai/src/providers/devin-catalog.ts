@@ -1,5 +1,5 @@
 /**
- * Devin offline model baseline: families (stable slugs) plus known aliases.
+ * Devin offline model catalog: families (stable slugs) plus known aliases.
  * Edit this file to update the out-of-the-box catalog; live refresh replaces
  * it with the agent-advertised variant list. Run `devin models list` to see
  * current families.

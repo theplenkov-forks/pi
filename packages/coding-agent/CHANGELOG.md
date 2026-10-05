@@ -20,6 +20,7 @@
 ### Added
 
 - Added Azure Foundry Chat Completions deployments, starting with `azure/deepseek-v4-pro` ([#9645](https://github.com/earendil-works/pi/issues/9645), [#9714](https://github.com/earendil-works/pi/pull/9714) by [@jsanter27](https://github.com/jsanter27))
+- Added ACP (Agent Client Protocol) providers: any ACP-compatible CLI can be configured as a provider in `models.json` with `command`/`args`/`env` (`"api": "acp"`), per-model overrides, `modelOverrides`, and `include`/`exclude` id filters. Devin ships as a built-in `devin` provider (`devin acp`) with a dynamically discovered model catalog. Authenticate with `devin auth login`, then pick a `devin/…` model in `/model`. See [ACP agents](docs/providers.md#acp-agents) ([#10496](https://github.com/earendil-works/pi/issues/10496)).
 
 ### Changed
 

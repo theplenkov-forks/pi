@@ -10,6 +10,7 @@
  * ModelManager migration.
  */
 
+export * from "./acp/api.lazy.ts";
 export * from "./api/anthropic-messages.lazy.ts";
 export * from "./api/azure-openai-responses.lazy.ts";
 export * from "./api/bedrock-converse-stream.lazy.ts";
@@ -28,6 +29,7 @@ export * from "./index.ts";
 export * from "./legacy-api-aliases.ts";
 export * from "./providers/images/register-builtins.ts";
 
+import { acpApi } from "./acp/api.lazy.ts";
 import { anthropicMessagesApi } from "./api/anthropic-messages.lazy.ts";
 import { azureOpenAIResponsesApi } from "./api/azure-openai-responses.lazy.ts";
 import { bedrockConverseStreamApi } from "./api/bedrock-converse-stream.lazy.ts";
@@ -178,6 +180,7 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 }
 
 const BUILTIN_APIS: [Api, ProviderStreams][] = [
+	["acp", acpApi()],
 	["anthropic-messages", anthropicMessagesApi()],
 	["openai-completions", openAICompletionsApi()],
 	["openai-responses", openAIResponsesApi()],

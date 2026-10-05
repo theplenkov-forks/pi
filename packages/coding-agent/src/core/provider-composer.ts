@@ -6,6 +6,7 @@ import {
 	type AuthContext,
 	type AuthInteraction,
 	type AuthResult,
+	acpBaseUrl,
 	type ClassifierApi,
 	type Credential,
 	type ImageApi,
@@ -21,10 +22,12 @@ import {
 	type ProviderHeaders,
 	type ProviderImages,
 	type RefreshModelsContext,
+	resolveAcpTransport,
 	type SimpleStreamOptions,
 	type StreamOptions,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
+import { acpCommandAuth } from "@earendil-works/pi-ai/acp/provider";
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { classifierErrorResult, imageErrorResult } from "@earendil-works/pi-ai/utils/model-operations";
 import type { ModelConfig, ModelsJsonModel, ModelsJsonModelOverride, ModelsJsonProvider } from "./model-config.ts";
@@ -175,8 +178,18 @@ function mergeSamplingParamsByThinkingLevel(
 }
 
 function applyModelOverride(model: Model<Api>, override: ModelsJsonModelOverride): Model<Api> {
+	const acp =
+		override.command !== undefined || override.args !== undefined || override.env !== undefined
+			? {
+					...model.acp,
+					...(override.command !== undefined ? { command: override.command } : {}),
+					...(override.args !== undefined ? { args: override.args } : {}),
+					...(override.env !== undefined ? { env: { ...model.acp?.env, ...override.env } } : {}),
+				}
+			: model.acp;
 	return {
 		...model,
+		...(acp !== undefined ? { acp } : {}),
 		name: override.name ?? model.name,
 		reasoning: override.reasoning ?? model.reasoning,
 		thinkingLevelMap: override.thinkingLevelMap
@@ -220,7 +233,9 @@ function modelFromJson(
 		);
 	}
 	const baseUrl = definition.baseUrl ?? providerConfig.baseUrl ?? defaults?.baseUrl;
-	if (!baseUrl) throw new Error(`Provider ${providerId}: "baseUrl" is required when defining custom models.`);
+	const isAcp = (definition.api ?? providerConfig.api ?? defaults?.api) === "acp";
+	if (!baseUrl && !isAcp)
+		throw new Error(`Provider ${providerId}: "baseUrl" is required when defining custom models.`);
 	if (definition.contextWindow !== undefined && definition.contextWindow <= 0) {
 		throw new Error(`Provider ${providerId}, model ${definition.id}: invalid contextWindow`);
 	}
@@ -232,7 +247,7 @@ function modelFromJson(
 		name: definition.name ?? definition.id,
 		api: api as Api,
 		provider: providerId,
-		baseUrl,
+		baseUrl: baseUrl ?? acpBaseUrl(providerId),
 		reasoning: definition.reasoning ?? false,
 		thinkingLevelMap: definition.thinkingLevelMap,
 		input: (definition.input ?? ["text"]) as ("text" | "image")[],
@@ -245,7 +260,42 @@ function modelFromJson(
 		samplingParamsByThinkingLevel: definition.samplingParamsByThinkingLevel,
 		headers: undefined,
 		compat: mergeCompat(providerConfig.compat, definition.compat),
+		...acpTransportFromJson(providerId, definition, providerConfig, defaults?.acp),
 	};
+}
+
+function acpTransportFromJson(
+	providerId: string,
+	definition: ModelsJsonModel,
+	providerConfig: ModelsJsonProvider,
+	baseAcp: Model<Api>["acp"],
+): { acp?: Model<Api>["acp"] } {
+	const api = definition.api ?? providerConfig.api;
+	if (
+		api !== "acp" &&
+		definition.command === undefined &&
+		definition.args === undefined &&
+		definition.env === undefined
+	) {
+		return {};
+	}
+	if (api !== "acp") {
+		throw new Error(`Provider ${providerId}, model ${definition.id}: "command"/"args"/"env" require "api": "acp".`);
+	}
+	const providerTransport = providerConfig.command
+		? { command: providerConfig.command, args: providerConfig.args, env: providerConfig.env }
+		: baseAcp?.command
+			? { command: baseAcp.command, args: baseAcp.args, env: baseAcp.env }
+			: undefined;
+	const resolved = resolveAcpTransport(providerTransport, {
+		command: definition.command,
+		args: definition.args,
+		env: definition.env,
+	});
+	if (!resolved) {
+		throw new Error(`Provider ${providerId}, model ${definition.id}: "command" is required for ACP models.`);
+	}
+	return { acp: resolved };
 }
 
 function findModelDefaults(models: readonly AnyModel[], modelId: string, api?: Api): Model<Api> | undefined {
@@ -288,13 +338,15 @@ function extensionModelFromDefinition(
 	}
 	const baseUrl = definition.baseUrl ?? config.baseUrl ?? defaults?.baseUrl;
 	if (!baseUrl) throw new Error(`Provider ${providerId}: "baseUrl" is required when defining custom models.`);
+	// Extension registrations carry no ACP transport; ACP models keep the base model's transport.
+	const inheritedAcp = api === "acp" && defaults && "acp" in defaults ? { acp: defaults.acp } : {};
 	if (definition.type === "image") {
 		return { ...definition, api: api as ImageApi, provider: providerId, baseUrl, headers: undefined };
 	}
 	if (definition.type === "classifier") {
 		return { ...definition, api: api as ClassifierApi, provider: providerId, baseUrl, headers: undefined };
 	}
-	return { ...definition, api: api as Api, provider: providerId, baseUrl, headers: undefined };
+	return { ...definition, api: api as Api, provider: providerId, baseUrl, headers: undefined, ...inheritedAcp };
 }
 
 function applyModelsJson(
@@ -310,6 +362,7 @@ function applyModelsJson(
 	if (
 		!config.models?.length &&
 		!config.baseUrl &&
+		!config.command &&
 		!config.headers &&
 		!config.compat &&
 		!hasOverrides &&
@@ -318,7 +371,7 @@ function applyModelsJson(
 		config.authHeader === undefined
 	) {
 		throw new Error(
-			`Provider ${providerId}: must specify "baseUrl", "headers", "compat", "modelOverrides", or "models".`,
+			`Provider ${providerId}: must specify "baseUrl", "command", "headers", "compat", "modelOverrides", or "models".`,
 		);
 	}
 
@@ -429,12 +482,16 @@ function composeApiKeyAuth(
 	const authHeader = extension?.authHeader ?? config?.authHeader ?? false;
 	return {
 		name: inherited?.name ?? "API key",
+		// An inherited auth without a login (e.g. ACP command auth) stays
+		// login-free; only key-based setups get the API-key prompt fallback.
 		login:
 			inherited?.login ??
-			(async (interaction: AuthInteraction) => ({
-				type: "api_key",
-				key: await interaction.prompt({ type: "secret", message: "Enter API key" }),
-			})),
+			(inherited
+				? undefined
+				: async (interaction: AuthInteraction) => ({
+						type: "api_key",
+						key: await interaction.prompt({ type: "secret", message: "Enter API key" }),
+					})),
 		check: async (input) => {
 			if (input.credential) {
 				if (inherited?.check) return inherited.check(input);
@@ -526,6 +583,23 @@ function rawModelHeaders(
 	return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
+/** First ACP command visible for a provider: provider-level, model-level, then base models. */
+function acpProviderCommand(base: Provider | undefined, config: ModelsJsonProvider | undefined): string | undefined {
+	if (config?.command) return config.command;
+	for (const definition of config?.models ?? []) {
+		if (definition.command) return definition.command;
+	}
+	return getAllProviderModels(base).find((model) => model.api === "acp")?.acp?.command;
+}
+
+/** Whether a provider serves ACP models from any layer. */
+function usesAcpTransport(base: Provider | undefined, config: ModelsJsonProvider | undefined): boolean {
+	if (config?.command || (config?.models ?? []).some((definition) => (definition.api ?? config?.api) === "acp")) {
+		return true;
+	}
+	return getAllProviderModels(base).some((model) => model.api === "acp");
+}
+
 export function validateExtensionProvider(
 	providerId: string,
 	base: Provider | undefined,
@@ -539,6 +613,19 @@ export function validateExtensionProvider(
 }
 
 /** Compose built-in, models.json, and extension layers without reading credentials. */
+/** Case-insensitive substring filter over model ids. Include narrows first, exclude removes after. */
+function acpModelFilter(config: ModelsJsonProvider | undefined): ((id: string) => boolean) | undefined {
+	const include = config?.include?.filter((pattern) => pattern.length > 0);
+	const exclude = config?.exclude?.filter((pattern) => pattern.length > 0);
+	if (!include?.length && !exclude?.length) return undefined;
+	return (id: string) => {
+		const lower = id.toLowerCase();
+		if (include?.length && !include.some((pattern) => lower.includes(pattern.toLowerCase()))) return false;
+		if (exclude?.some((pattern) => lower.includes(pattern.toLowerCase()))) return false;
+		return true;
+	};
+}
+
 export function composeModelProvider(
 	providerId: string,
 	base: Provider | undefined,
@@ -546,6 +633,9 @@ export function composeModelProvider(
 	extension: ProviderConfigInput | undefined,
 ): Provider {
 	const config = modelConfig.getProvider(providerId);
+	if (config?.command && config?.oauth) {
+		throw new Error(`Provider ${providerId}: "command" (ACP) cannot be combined with "oauth".`);
+	}
 	let extensionOAuthCredential: OAuthCredentials | undefined;
 	let refreshedExtensionModels: ProviderConfigInput["models"];
 	const currentExtension = (): ProviderConfigInput | undefined =>
@@ -575,7 +665,13 @@ export function composeModelProvider(
 	};
 	// Validate eagerly so registration/reload reports structural errors immediately.
 	getAllModels();
-	const apiKey = composeApiKeyAuth(providerId, base, config, extension);
+	const displayName = extension?.name ?? config?.name ?? base?.name ?? extension?.oauth?.name ?? providerId;
+	let apiKey: ApiKeyAuth | undefined;
+	if (usesAcpTransport(base, config) && configuredApiKey(config, extension) === undefined && !base?.auth.apiKey) {
+		const command = acpProviderCommand(base, config);
+		if (command) apiKey = acpCommandAuth(displayName, () => acpProviderCommand(base, config));
+	}
+	apiKey ??= composeApiKeyAuth(providerId, base, config, extension);
 	const oauth = composeOAuthAuth(providerId, base, config, extension);
 	if (!apiKey && !oauth) throw new Error(`Provider ${providerId}: no authentication method configured.`);
 
@@ -642,6 +738,18 @@ export function composeModelProvider(
 		stream: (model, context, options) => streamWith(model, context, options, false),
 		streamSimple: (model, context, options) => streamWith(model, context, options, true),
 	};
+
+	const filter = acpModelFilter(config);
+	if (filter) {
+		if (!usesAcpTransport(base, config)) {
+			throw new Error(`Provider ${providerId}: "include"/"exclude" require an ACP provider.`);
+		}
+		// View-layer filter: the persisted snapshot stays complete, reads are narrowed.
+		const unfilteredAll = provider.getAllModels?.bind(provider) ?? (() => getAllModels());
+		const unfilteredChat = provider.getModels.bind(provider);
+		provider.getAllModels = () => unfilteredAll().filter((model) => filter(model.id));
+		provider.getModels = () => unfilteredChat().filter((model) => filter(model.id));
+	}
 
 	const fetchDeferred = base?.fetchDeferred;
 	if (fetchDeferred) {

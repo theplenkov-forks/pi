@@ -40,6 +40,7 @@ export type KnownProvider =
 	| "amazon-bedrock"
 	| "ant-ling"
 	| "anthropic"
+	| "devin"
 	| "google"
 	| "google-vertex"
 	| "openai"
@@ -1107,6 +1108,22 @@ export interface BaseModel<TApi extends string> {
 	inputLimits?: ModelInputLimits;
 	cost: ModelCost;
 	headers?: Record<string, string>;
+	/**
+	 * ACP subprocess transport for `api: "acp"` models: the command to spawn,
+	 * with per-model `args`/`env`/`command` overrides over the provider-level
+	 * transport. Ignored by other APIs.
+	 */
+	acp?: ModelAcpTransport;
+}
+
+/**
+ * Subprocess transport for one ACP model. `command` falls back to the
+ * provider-level transport; `args`/`env` override it when present.
+ */
+export interface ModelAcpTransport {
+	command?: string;
+	args?: string[];
+	env?: Record<string, string>;
 }
 
 /** Chat model: usable with `stream()` and friends. */

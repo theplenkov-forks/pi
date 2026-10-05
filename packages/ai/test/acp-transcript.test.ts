@@ -1,0 +1,95 @@
+import { describe, expect, it } from "vitest";
+import { transcriptToAcpPrompt } from "../src/acp/transcript.ts";
+import type { Message } from "../src/types.ts";
+
+const timestamp = 1700000000000;
+
+describe("transcriptToAcpPrompt", () => {
+	it("prepends the system prompt once and converts a user text message", () => {
+		const messages: Message[] = [{ role: "user", content: "Fix the bug", timestamp }];
+		const blocks = transcriptToAcpPrompt(messages, { systemPrompt: "You are pi." });
+		expect(blocks).toEqual([
+			{ type: "text", text: "You are pi." },
+			{ type: "text", text: "Fix the bug" },
+		]);
+	});
+
+	it("omits the system prompt when not provided and skips system messages", () => {
+		const messages: Message[] = [
+			{ role: "system", content: "base prompt", timestamp },
+			{ role: "user", content: "Hello", timestamp },
+		];
+		expect(transcriptToAcpPrompt(messages)).toEqual([{ type: "text", text: "Hello" }]);
+	});
+
+	it("splits image parts into image blocks after the message text", () => {
+		const messages: Message[] = [
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "Describe this" },
+					{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+				],
+				timestamp,
+			},
+		];
+		expect(transcriptToAcpPrompt(messages)).toEqual([
+			{ type: "text", text: "Describe this" },
+			{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+		]);
+	});
+
+	it("renders assistant and tool history as quoted text for model switches", () => {
+		const messages: Message[] = [
+			{
+				role: "assistant",
+				content: [
+					{ type: "text", text: "Reading the file." },
+					{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "a.txt" } },
+				],
+				api: "openai-completions",
+				provider: "openai",
+				model: "gpt",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call_1",
+				toolName: "read",
+				content: [{ type: "text", text: "file contents" }],
+				isError: false,
+				timestamp,
+			},
+			{ role: "user", content: "Continue", timestamp },
+		];
+		const blocks = transcriptToAcpPrompt(messages);
+		expect(blocks[0]).toEqual({
+			type: "text",
+			text: 'Assistant: Reading the file.\n\nTool call `read`: {"path":"a.txt"}',
+		});
+		expect(blocks[1]).toEqual({ type: "text", text: "Tool result `read`: file contents" });
+		expect(blocks[2]).toEqual({ type: "text", text: "Continue" });
+	});
+
+	it("skips empty user messages", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "   ", timestamp },
+			{ role: "user", content: "Real", timestamp },
+		];
+		expect(transcriptToAcpPrompt(messages)).toEqual([{ type: "text", text: "Real" }]);
+	});
+
+	it("returns no blocks for history without user-visible content", () => {
+		const messages: Message[] = [{ role: "system", content: "prompt", timestamp }];
+		expect(transcriptToAcpPrompt(messages)).toEqual([]);
+	});
+});

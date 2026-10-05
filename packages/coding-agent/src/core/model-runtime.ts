@@ -223,10 +223,14 @@ export class ModelRuntime implements Models {
 				? new FileModelsStore(options.modelsStorePath ?? join(dirname(modelsPath), "models-store.json"))
 				: new InMemoryCodingAgentModelsStore());
 		const builtinModelDataGeneratedAt = builtinProviderCatalog.getBuiltinModelDataGeneratedAt();
+		// Providers with their own dynamic catalog (radius gateways, ACP agents)
+		// skip the pi.dev overlay: it would shadow their refreshModels, and the
+		// catalog 404s for ids it does not know.
+		const selfCataloguedProviders = new Set(["radius", "devin"]);
 		const providers = builtinProviderCatalog
 			.builtinProviders()
 			.map((provider) =>
-				provider.id === "radius"
+				selfCataloguedProviders.has(provider.id)
 					? provider
 					: withRemoteCatalog(provider, options.catalogBaseUrl, builtinModelDataGeneratedAt),
 			);

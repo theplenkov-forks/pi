@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ACP (Agent Client Protocol) providers: any ACP-compatible CLI can be configured as a provider in `models.json` with `command`/`args`/`env`, and Devin ships as a built-in `devin` provider (`devin acp`) with a dynamically discovered model catalog (ACP session config; family-slug baseline offline). Pi spawns the agent, keeps one ACP session per Pi session, and renders agent text, thoughts, tool activity, and usage as a normal model stream ([#10496](https://github.com/earendil-works/pi/issues/10496)).
+
 ### Fixed
 
 - Fixed Bedrock requests that fail with `The pending stream has been canceled` after a stalled HTTP/2 connection not being retried automatically ([#10379](https://github.com/earendil-works/pi/issues/10379))

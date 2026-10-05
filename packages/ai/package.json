@@ -31,6 +31,10 @@
 			"types": "./dist/api/*.d.ts",
 			"import": "./dist/api/*.js"
 		},
+		"./acp/*": {
+			"types": "./dist/acp/*.d.ts",
+			"import": "./dist/acp/*.js"
+		},
 		"./utils/*": {
 			"types": "./dist/utils/*.d.ts",
 			"import": "./dist/utils/*.js"
@@ -67,6 +71,7 @@
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
+		"@agentclientprotocol/sdk": "1.7.0",
 		"@anthropic-ai/sdk": "0.129.0",
 		"@aws-sdk/client-bedrock-runtime": "3.1127.0",
 		"@earendil-works/pi-telemetry": "^1.0.3",

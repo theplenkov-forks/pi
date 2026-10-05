@@ -5,6 +5,13 @@ import type { Provider, RefreshModelsContext } from "../models.ts";
 import type { Model, ProviderEnv } from "../types.ts";
 import { DEVIN_ACP_ARGS, DEVIN_BASELINE_MODELS, DEVIN_COMMAND } from "./devin-catalog.ts";
 
+/**
+ * Limits used when the agent advertises no metadata. Shared with the offline
+ * baseline so a model's reported limits do not change at the first refresh.
+ */
+export const DEVIN_CONTEXT_WINDOW = 200000;
+export const DEVIN_MAX_TOKENS = 16384;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
@@ -49,10 +56,15 @@ export function devinModelsFromConfigOptions(
 		}
 	}
 	const seen = new Set<string>();
+	// The offline baseline already declares some ids (with curated reasoning and
+	// window values). Reusing its flags keeps a model's reported capabilities
+	// identical before and after a refresh, which replaces the baseline.
+	const baseline = new Map(DEVIN_BASELINE_MODELS.map((entry) => [entry.id, entry]));
 	const models: Model<"acp">[] = [];
 	for (const entry of flat) {
 		if (typeof entry.value !== "string" || entry.value.length === 0 || seen.has(entry.value)) continue;
 		seen.add(entry.value);
+		const known = baseline.get(entry.value);
 		models.push({
 			id: entry.value,
 			name: entry.name || entry.value,
@@ -61,9 +73,9 @@ export function devinModelsFromConfigOptions(
 			baseUrl: `acp://${providerId}`,
 			input: imageCapable((entry as { _meta?: unknown })._meta) ? ["text", "image"] : ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 200000,
-			maxTokens: 16384,
-			reasoning: hasThinkingTier(entry.value),
+			contextWindow: known?.contextWindow ?? DEVIN_CONTEXT_WINDOW,
+			maxTokens: known?.maxTokens ?? DEVIN_MAX_TOKENS,
+			reasoning: known?.reasoning ?? hasThinkingTier(entry.value),
 			acp: { command: DEVIN_COMMAND, args: [...DEVIN_ACP_ARGS, "--model", entry.value] },
 		});
 	}
@@ -99,6 +111,7 @@ export function devinProvider(): Provider<"acp"> {
 		name: "Devin",
 		transport: { command: DEVIN_COMMAND, args: DEVIN_ACP_ARGS },
 		models: DEVIN_BASELINE_MODELS,
+		defaults: { contextWindow: DEVIN_CONTEXT_WINDOW, maxTokens: DEVIN_MAX_TOKENS },
 		fetchModels: fetchDevinModels,
 		// The agent lists what it serves, so its catalog replaces the offline baseline.
 		authoritativeCatalog: true,

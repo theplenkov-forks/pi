@@ -179,8 +179,13 @@ function mergeSamplingParamsByThinkingLevel(
 }
 
 function applyModelOverride(model: Model<Api>, override: ModelsJsonModelOverride): Model<Api> {
+	// An override only builds a transport when the model already has one, or when
+	// the override supplies the command. `env`/`args` alone would otherwise attach
+	// a command-less ACP transport and fail at request time with a misleading
+	// missing-command error.
 	const acp =
-		override.command !== undefined || override.args !== undefined || override.env !== undefined
+		model.acp !== undefined &&
+		(override.command !== undefined || override.args !== undefined || override.env !== undefined)
 			? {
 					...model.acp,
 					...(override.command !== undefined ? { command: override.command } : {}),
@@ -374,6 +379,8 @@ function applyModelsJson(
 		!config.models?.length &&
 		!config.baseUrl &&
 		!config.command &&
+		!config.args?.length &&
+		!config.env &&
 		!config.headers &&
 		!config.compat &&
 		!hasOverrides &&
@@ -384,7 +391,7 @@ function applyModelsJson(
 		config.authHeader === undefined
 	) {
 		throw new Error(
-			`Provider ${providerId}: must specify "baseUrl", "command", "headers", "compat", "modelOverrides", "include"/"exclude", or "models".`,
+			`Provider ${providerId}: must specify "baseUrl", "command", "args", "env", "headers", "compat", "modelOverrides", "include"/"exclude", or "models".`,
 		);
 	}
 

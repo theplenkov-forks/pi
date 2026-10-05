@@ -26,16 +26,23 @@ function assistantText(message: Extract<Message, { role: "assistant" }>): string
 
 /**
  * Tool-result blocks. Text becomes the labelled quoted form; images are kept as
- * image blocks so a vision-capable ACP agent can still inspect them.
+ * image blocks so a vision-capable ACP agent can still inspect them. The label
+ * is always emitted, so an image-only result keeps its tool context and a
+ * filtered image is not silently dropped.
  */
 function toolResultBlocks(message: Extract<Message, { role: "toolResult" }>, supportsImages: boolean): ContentBlock[] {
 	const label = message.isError ? "Tool error" : "Tool result";
 	const blocks: ContentBlock[] = [];
 	const text = contentText(message.content);
-	if (text.length > 0) blocks.push({ type: "text", text: `${label} \`${message.toolName}\`: ${text}` });
-	if (!supportsImages || typeof message.content === "string") return blocks;
-	for (const block of message.content) {
-		if (block.type === "image") blocks.push({ type: "image", data: block.data, mimeType: block.mimeType });
+	const parts = typeof message.content === "string" ? [] : message.content;
+	const hasImages = parts.some((part) => part.type === "image");
+	if (text.length > 0 || hasImages) {
+		const note = hasImages && !supportsImages ? " (image omitted: model does not accept images)" : "";
+		blocks.push({ type: "text", text: `${label} \`${message.toolName}\`: ${text}${note}`.trimEnd() });
+	}
+	if (!supportsImages) return blocks;
+	for (const part of parts) {
+		if (part.type === "image") blocks.push({ type: "image", data: part.data, mimeType: part.mimeType });
 	}
 	return blocks;
 }

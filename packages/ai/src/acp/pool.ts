@@ -138,19 +138,28 @@ function throwIfAborted(signal?: AbortSignal): void {
 }
 
 /**
- * Fingerprint of the first `count` transcript messages. Role, timestamp, and
- * content size survive message conversion and change when a message is edited
- * or replaced, so they identify the prefix the agent has already seen.
+ * Fingerprint of the first `count` transcript messages. Hashes role, timestamp,
+ * and content: an edited message can keep the same role, timestamp, and length
+ * (`"hello"` -> `"world"`), so content has to be part of the identity. Message
+ * objects are rebuilt by some `convertToLlm` implementations, hence a value
+ * hash rather than object identity.
  */
 function sentPrefixFingerprint(messages: readonly Message[], count: number): string {
-	let fingerprint = "";
+	// FNV-1a: cheap, allocation-light, and only needs to detect changes.
+	let hash = 0x811c9dc5;
+	const mix = (text: string) => {
+		for (let index = 0; index < text.length; index++) {
+			hash ^= text.charCodeAt(index);
+			hash = Math.imul(hash, 0x01000193);
+		}
+	};
 	for (let index = 0; index < count; index++) {
 		const message = messages[index];
-		const content = message?.content;
-		const size = typeof content === "string" ? content.length : (content?.length ?? 0);
-		fingerprint += `${index}:${message?.role ?? "?"}:${message?.timestamp ?? 0}:${size};`;
+		mix(`${index}|${message?.role ?? "?"}|${message?.timestamp ?? 0}|`);
+		if (message) mix(JSON.stringify(message.content) ?? "");
+		mix(";");
 	}
-	return fingerprint;
+	return `${count}:${(hash >>> 0).toString(16)}`;
 }
 
 async function readTextFileContent(path: string): Promise<string> {
@@ -408,9 +417,11 @@ function toPromptResult(
 	return { stopReason: response.stopReason, turnUsage };
 }
 
-/** Drop a pooled ACP session and close it on the agent side. */
+/** Drop a pooled ACP session and close it on the agent side. Idempotent. */
 function retireSession(entry: PooledConnection, sessionKey: string, state: PooledSession): void {
-	if (entry.sessions.get(sessionKey) === state) entry.sessions.delete(sessionKey);
+	const held = entry.sessions.get(sessionKey);
+	if (held && held !== state) return;
+	if (held) entry.sessions.delete(sessionKey);
 	state.session.dispose();
 	void entry.connection.agent
 		.request(acp.methods.agent.session.close, { sessionId: state.session.sessionId })
@@ -561,7 +572,7 @@ async function runTurn(
 			// would overlap turns or resend on top of partial state.
 			cancelListener();
 			await responsePromise.catch(() => {});
-			if (entry.sessions.get(sessionKey) === state) retireSession(entry, sessionKey, state);
+			retireSession(entry, sessionKey, state);
 			return { stopReason: "cancelled", turnUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 		}
 		// Streaming failed: stop the agent's turn before reporting the error, so

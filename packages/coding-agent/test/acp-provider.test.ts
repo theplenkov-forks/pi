@@ -193,8 +193,12 @@ describe("ACP models.json support", () => {
 	});
 
 	it("uses a configured command override for auth even when the builtin has command auth", async () => {
+		// An empty directory as PATH keeps this independent of the ambient
+		// environment (an empty PATH string would search the current directory).
+		const emptyDir = mkdtempSync(join(tmpdir(), "acp-empty-"));
+		tempDirs.push(emptyDir);
 		const config = await loadConfig({
-			providers: { devin: { command: "no-such-acp-binary-xyz", env: { PATH: "" } } },
+			providers: { devin: { command: "no-such-acp-binary-xyz", env: { PATH: emptyDir } } },
 		});
 		const provider = composeModelProvider("devin", devinProvider(), config, undefined);
 		// The override replaces the builtin's `devin` command, so availability must
@@ -220,6 +224,34 @@ describe("ACP models.json support", () => {
 			args: ["acp", "--model", "swe-2"],
 			env: { DEVIN_PROFILE: "night" },
 		});
+	});
+
+	it("accepts a provider entry that only carries args and env", async () => {
+		const config = await loadConfig({
+			providers: { devin: { env: { DEVIN_PROFILE: "night" } } },
+		});
+		expect(config.getError()).toBeUndefined();
+		const model = composeModelProvider("devin", devinProvider(), config, undefined)
+			.getModels()
+			.find((entry) => entry.id === "swe-2");
+		expect(model?.acp?.env).toMatchObject({ DEVIN_PROFILE: "night" });
+	});
+
+	it("ignores an env-only modelOverride on a model with no ACP transport", async () => {
+		const config = await loadConfig({
+			providers: {
+				ep: {
+					baseUrl: "https://x.example/v1",
+					api: "openai-completions",
+					models: [{ id: "m" }],
+					modelOverrides: { m: { env: { X: "1" } } },
+				},
+			},
+		});
+		const model = composeModelProvider("ep", undefined, config, undefined).getModels()[0];
+		// No transport to layer env onto: a command-less ACP transport would fail
+		// later with a misleading missing-command error.
+		expect(model?.acp).toBeUndefined();
 	});
 
 	it("rejects include/exclude on non-ACP providers", async () => {

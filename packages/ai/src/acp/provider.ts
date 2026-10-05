@@ -79,6 +79,11 @@ export interface AcpProviderOptions {
 	transport: AcpTransportConfig;
 	models: AcpChatModelDefinition[];
 	/**
+	 * Limits applied when a model definition omits them. Shared with dynamic
+	 * discovery so a model's reported limits do not change at the first refresh.
+	 */
+	defaults?: Pick<AcpChatModelDefinition, "input" | "contextWindow" | "maxTokens">;
+	/**
 	 * Dynamic model discovery (e.g. ACP session config). createProvider
 	 * restores the persisted snapshot offline and publishes fetched models.
 	 */
@@ -99,6 +104,7 @@ export function acpChatModel(
 	providerId: string,
 	transport: AcpTransportConfig,
 	definition: AcpChatModelDefinition,
+	defaults?: Pick<AcpChatModelDefinition, "input" | "contextWindow" | "maxTokens">,
 ): Model<"acp"> {
 	const resolved = resolveAcpTransport(transport, definition.transport);
 	if (!resolved) throw new Error(`ACP model ${providerId}/${definition.id} has no command configured`);
@@ -109,10 +115,10 @@ export function acpChatModel(
 		api: "acp",
 		provider: providerId,
 		baseUrl: acpBaseUrl(providerId),
-		input: definition.input ?? ["text"],
+		input: definition.input ?? defaults?.input ?? ["text"],
 		cost: definition.cost ?? zeroCost(),
-		contextWindow: definition.contextWindow ?? 128000,
-		maxTokens: definition.maxTokens ?? 16384,
+		contextWindow: definition.contextWindow ?? defaults?.contextWindow ?? 128000,
+		maxTokens: definition.maxTokens ?? defaults?.maxTokens ?? 16384,
 		reasoning: definition.reasoning ?? false,
 		acp: {
 			command: resolved.command,
@@ -135,7 +141,7 @@ export function createAcpProvider(options: AcpProviderOptions): Provider<"acp"> 
 				() => transport.env,
 			),
 		},
-		models: options.models.map((definition) => acpChatModel(options.id, transport, definition)),
+		models: options.models.map((definition) => acpChatModel(options.id, transport, definition, options.defaults)),
 		fetchModels: options.fetchModels,
 		replaceBaselineOnDynamicCatalog: options.authoritativeCatalog && options.fetchModels !== undefined,
 		api: acpApi(),

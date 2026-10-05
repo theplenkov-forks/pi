@@ -19,12 +19,13 @@ function binaryName(command: string): string {
 
 /**
  * Suffixes to try for a bare command name. An empty first entry tries the name
- * exactly as configured (`agent.cmd`, extensionless scripts), then PATHEXT.
+ * exactly as configured (`agent.cmd`, extensionless scripts), then the OS
+ * default PATHEXT so lookup never rejects a command the OS would run.
  */
 function candidateSuffixes(binary: string): string[] {
 	if (process.platform !== "win32") return [""];
 	if (extname(binary)) return [""];
-	return ["", ...(process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";").filter(Boolean)];
+	return ["", ...(process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)];
 }
 
 /** Locate a binary on PATH. Returns the absolute path or undefined. */

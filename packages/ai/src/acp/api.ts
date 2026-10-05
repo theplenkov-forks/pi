@@ -93,18 +93,33 @@ class AcpEventConverter {
 		this.eventStream.push({ type: "text_delta", contentIndex: this.textIndex, delta, partial: this.partial });
 	}
 
+	/** Agent thought text, concatenated verbatim as the agent sent it. */
 	appendThinking(delta: string): void {
 		if (this.thinkingIndex < 0 || this.afterText) this.startThinking();
-		// Separator depends on the block opened above, so compute after starting it.
-		const line = this.thinking.length > 0 && !this.thinking.endsWith("\n") ? `\n${delta}` : delta;
 		this.afterThinking = true;
 		this.afterText = false;
-		this.thinking += line;
+		this.thinking += delta;
 		(this.partial.content[this.thinkingIndex] as { thinking: string }).thinking = this.thinking;
 		this.eventStream.push({
 			type: "thinking_delta",
 			contentIndex: this.thinkingIndex,
-			delta: line,
+			delta,
+			partial: this.partial,
+		});
+	}
+
+	/** Activity pi renders itself (tool calls, plans, notices): one line each. */
+	appendActivity(line: string): void {
+		if (this.thinkingIndex < 0 || this.afterText) this.startThinking();
+		this.afterThinking = true;
+		this.afterText = false;
+		const delta = this.thinking.length > 0 && !this.thinking.endsWith("\n") ? `\n${line}` : line;
+		this.thinking += delta;
+		(this.partial.content[this.thinkingIndex] as { thinking: string }).thinking = this.thinking;
+		this.eventStream.push({
+			type: "thinking_delta",
+			contentIndex: this.thinkingIndex,
+			delta,
 			partial: this.partial,
 		});
 	}
@@ -127,31 +142,31 @@ class AcpEventConverter {
 		switch (update.sessionUpdate) {
 			case "agent_message_chunk":
 				if (update.content.type === "text") this.appendText(update.content.text);
-				else this.appendThinking(`[${update.content.type} content]`);
+				else this.appendActivity(`[${update.content.type} content]`);
 				break;
 			case "agent_thought_chunk":
 				if (update.content.type === "text") this.appendThinking(update.content.text);
-				else this.appendThinking(`[${update.content.type} content]`);
+				else this.appendActivity(`[${update.content.type} content]`);
 				break;
 			case "tool_call":
-				this.appendThinking(
+				this.appendActivity(
 					`Tool: ${update.title}${update.name ? ` (${update.name})` : ""} [${update.status ?? "pending"}]`,
 				);
 				break;
 			case "tool_call_update": {
-				if (update.status) this.appendThinking(`Tool ${update.toolCallId} -> ${update.status}`);
+				if (update.status) this.appendActivity(`Tool ${update.toolCallId} -> ${update.status}`);
 				for (const content of update.content ?? []) {
 					const text = toolCallContentText(content);
-					if (text) this.appendThinking(text);
+					if (text) this.appendActivity(text);
 				}
-				for (const location of update.locations ?? []) this.appendThinking(`File: ${location.path}`);
+				for (const location of update.locations ?? []) this.appendActivity(`File: ${location.path}`);
 				break;
 			}
 			case "plan":
-				for (const entry of update.entries) this.appendThinking(`- [${entry.status}] ${entry.content}`);
+				for (const entry of update.entries) this.appendActivity(`- [${entry.status}] ${entry.content}`);
 				break;
 			case "notice":
-				this.appendThinking(
+				this.appendActivity(
 					`Notice [${update.severity}] ${update.title}${update.description ? `: ${update.description}` : ""}`,
 				);
 				break;
@@ -201,9 +216,11 @@ class AcpEventConverter {
 
 		const stopReason = result.stopReason;
 		if (stopReason === "cancelled") {
-			this.partial.stopReason = "aborted";
+			// Only the caller's own abort is an aborted request; an agent that
+			// cancelled on its own is an error the user needs to see.
+			this.partial.stopReason = aborted ? "aborted" : "error";
 			this.partial.errorMessage = aborted ? "Request aborted" : "The agent cancelled the turn";
-			this.eventStream.push({ type: "error", reason: "aborted", error: this.partial });
+			this.eventStream.push({ type: "error", reason: this.partial.stopReason, error: this.partial });
 		} else if (stopReason === "refusal") {
 			this.partial.stopReason = "error";
 			this.partial.errorMessage = "The agent refused to continue";

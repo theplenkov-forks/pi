@@ -104,11 +104,15 @@ describe("acpCommandAuth", () => {
 	});
 
 	it("reports unconfigured when the command is missing", async () => {
-		// An empty PATH makes the result independent of the ambient environment.
+		// A PATH pointing at an empty directory makes the result independent of
+		// the ambient environment. An empty PATH string would not: lookup treats
+		// an empty entry as the current directory.
+		const emptyDir = mkdtempSync(join(tmpdir(), "acp-auth-empty-"));
+		tempDirs.push(emptyDir);
 		const auth = acpCommandAuth(
 			"Devin",
 			() => "no-such-acp-binary-xyz",
-			() => ({ PATH: "" }),
+			() => ({ PATH: emptyDir }),
 		);
 		expect(await auth.check?.({ ...testContext(), credential: undefined })).toBeUndefined();
 		expect(await auth.resolve?.({ ...testContext(), credential: undefined })).toBeUndefined();

@@ -228,6 +228,21 @@ describe("runAcpPrompt over a real ACP subprocess", () => {
 	});
 });
 
+it("spawns the agent with the transport's env", async () => {
+	// Per-model and provider-level `env` ride on the transport, not on auth:
+	// this proves they reach the spawned process.
+	const texts: string[] = [];
+	await runAcpPrompt(transport({ ACP_FAKE_ECHO_ENV: "ACP_TEST_MARKER", ACP_TEST_MARKER: "per-model" }), [user("hi")], {
+		sessionKey: "s10",
+		onUpdate: (notification) => {
+			if (notification.update.sessionUpdate === "agent_message_chunk") {
+				texts.push(notification.update.content.type === "text" ? notification.update.content.text : "");
+			}
+		},
+	});
+	expect(texts).toEqual(["echo:hi env:per-model"]);
+});
+
 describe("fetchAcpSessionInfo", () => {
 	it("reports agent-advertised model options and modes", async () => {
 		const info = await fetchAcpSessionInfo(transport({ ACP_FAKE_MODEL_OPTIONS: "3" }));

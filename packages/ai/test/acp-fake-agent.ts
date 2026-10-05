@@ -21,7 +21,8 @@ if (spawnLog) appendFileSync(spawnLog, `${process.pid}\n`);
 
 const usage = process.env.ACP_FAKE_TURN_USAGE?.split(",").map(Number);
 const stopReason = (process.env.ACP_FAKE_STOP_REASON ?? "end_turn") as acp.StopReason;
-let turnCount = 0;
+/** Cumulative turn count per ACP session; the pool diffs usage per session. */
+const turnsBySession = new Map<string, number>();
 
 const app = acp
 	.agent({ name: "fake-acp" })
@@ -62,10 +63,19 @@ const app = acp
 	})
 	.onRequest(acp.methods.agent.session.prompt, async (ctx) => {
 		if (process.env.ACP_FAKE_FAIL_PROMPT) throw new Error("fake prompt failure");
-		turnCount += 1;
-		const text = ctx.params.prompt
-			.filter((block) => block.type === "text")
-			.map((block) => block.text)
+		// Cumulative usage is per session: the pool diffs it per ACP session, and
+		// several sessions share one pooled process.
+		const turnCount = (turnsBySession.get(ctx.params.sessionId) ?? 0) + 1;
+		turnsBySession.set(ctx.params.sessionId, turnCount);
+		const text = [
+			ctx.params.prompt
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.join(" "),
+			// Echo one environment variable so tests can prove the spawn env.
+			process.env.ACP_FAKE_ECHO_ENV ? `env:${process.env[process.env.ACP_FAKE_ECHO_ENV] ?? ""}` : "",
+		]
+			.filter(Boolean)
 			.join(" ");
 		await ctx.client.notify(acp.methods.client.session.update, {
 			sessionId: ctx.params.sessionId,

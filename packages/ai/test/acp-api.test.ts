@@ -94,6 +94,39 @@ describe("createAcpStreams", () => {
 		]);
 	});
 
+	it("reports an agent-initiated cancellation as an error, not an aborted request", async () => {
+		const streams = createAcpStreams(
+			runnerFor([], { stopReason: "cancelled", turnUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }),
+		);
+		// No aborted signal: the agent stopped on its own.
+		const message = await streams
+			.streamSimple(
+				createModel(),
+				normalizeContext({ messages: [{ role: "user", content: "Hi", timestamp: 1 }] }),
+				{},
+			)
+			.result();
+		expect(message.stopReason).toBe("error");
+		expect(message.errorMessage).toBe("The agent cancelled the turn");
+	});
+
+	it("concatenates agent thought chunks verbatim", async () => {
+		const streams = createAcpStreams(
+			runnerFor([thoughtChunk("first half "), thoughtChunk("second half")], {
+				stopReason: "end_turn",
+				turnUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			}),
+		);
+		const message = await streams
+			.streamSimple(
+				createModel(),
+				normalizeContext({ messages: [{ role: "user", content: "Hi", timestamp: 1 }] }),
+				{},
+			)
+			.result();
+		expect(message.content).toEqual([{ type: "thinking", thinking: "first half second half" }]);
+	});
+
 	it("reports an unrecognized agent stop reason instead of a clean finish", async () => {
 		const streams = createAcpStreams(
 			runnerFor([], {

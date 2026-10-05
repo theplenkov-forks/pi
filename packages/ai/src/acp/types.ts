@@ -31,7 +31,12 @@ export function resolveAcpTransport(
 	return { command, ...(args !== undefined ? { args } : {}), ...(Object.keys(env).length > 0 ? { env } : {}) };
 }
 
-/** Join the command and its args into a display string. Never parses or executes. */
+/**
+ * Join the command and its args into a display string, keeping flags but not
+ * values: this text goes into error messages and logs, and args can carry
+ * secrets. Never parses or executes.
+ */
 export function formatAcpCommand(transport: AcpTransportConfig): string {
-	return [transport.command, ...(transport.args ?? [])].join(" ");
+	const args = (transport.args ?? []).map((arg) => (arg.startsWith("-") ? arg : "…"));
+	return [transport.command, ...args].join(" ");
 }

@@ -141,10 +141,11 @@ describe("transcriptToAcpPrompt", () => {
 			{ type: "text", text: "Tool result `screenshot`: captured" },
 			{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
 		]);
-		// A text-only agent must not receive image blocks at all.
+		// A text-only agent must not receive image blocks, but must still learn
+		// that the tool produced one.
 		expect(transcriptToAcpPrompt(messages, { supportsImages: false })).toEqual([
 			{ type: "text", text: "Assistant: Thinking: considering\n\nDone." },
-			{ type: "text", text: "Tool result `screenshot`: captured" },
+			{ type: "text", text: "Tool result `screenshot`: captured (image omitted: model does not accept images)" },
 		]);
 	});
 

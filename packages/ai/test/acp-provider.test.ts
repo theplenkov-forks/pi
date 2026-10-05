@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { acpChatModel, createAcpProvider } from "../src/acp/provider.ts";
 import { ACP_API, acpBaseUrl, formatAcpCommand, resolveAcpTransport } from "../src/acp/types.ts";
@@ -20,8 +23,12 @@ describe("ACP transport config", () => {
 		expect(resolveAcpTransport(undefined, {})).toBeUndefined();
 	});
 
-	it("formats commands for error messages", () => {
-		expect(formatAcpCommand({ command: "devin", args: ["acp"] })).toBe("devin acp");
+	it("formats commands for error messages without leaking argument values", () => {
+		expect(formatAcpCommand({ command: "devin", args: ["acp"] })).toBe("devin …");
+		expect(formatAcpCommand({ command: "devin", args: ["acp", "--model", "swe-2"] })).toBe("devin … --model …");
+		// Argument values can carry secrets, so only flag names survive.
+		expect(formatAcpCommand({ command: "agent", args: ["--token", "sk-secret"] })).toBe("agent --token …");
+		expect(formatAcpCommand({ command: "agent" })).toBe("agent");
 		expect(acpBaseUrl("devin")).toBe("acp://devin");
 		expect(ACP_API).toBe("acp");
 	});
@@ -58,13 +65,14 @@ describe("devinProvider", () => {
 		expect(models[0]?.acp).toEqual({ command: "devin", args: ["acp", "--model", "adaptive"] });
 		expect(provider.auth.apiKey?.login).toBeUndefined();
 		expect(typeof provider.refreshModels).toBe("function");
-		// Unresolvable command: unconfigured, not broken. An empty PATH keeps the
-		// result independent of the ambient environment.
+		// Unresolvable command: unconfigured, not broken. An empty directory as
+		// PATH keeps the result independent of the ambient environment (an empty
+		// PATH string would search the current directory instead).
 		const { acpCommandAuth: checkAuth } = await import("../src/acp/provider.ts");
 		const missing = checkAuth(
 			"Devin",
 			() => "no-such-acp-binary-xyz",
-			() => ({ PATH: "" }),
+			() => ({ PATH: mkdtempSync(join(tmpdir(), "acp-empty-")) }),
 		);
 		expect(
 			await missing.check?.({

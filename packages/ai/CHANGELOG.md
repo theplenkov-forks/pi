@@ -15,6 +15,9 @@
 - Fixed ACP stop reasons other than `end_turn` and the length reasons being reported as a successful completion, and fixed agent text and thinking blocks being reordered relative to each other
 - Fixed ACP agents on Windows failing to launch from `.cmd`/`.bat` shims or bare names: the resolved binary is spawned, and command shims run through `cmd.exe`
 - Fixed one concurrent ACP turn's abort cancelling another turn's permission requests on the same connection, and fixed a branched or edited ACP transcript reusing a stale session prefix
+- Fixed ACP error labels and debug logs echoing argument values that can contain secrets, keeping only flag names
+- Fixed an ACP turn the agent cancelled itself being reported as an aborted request, and fixed agent thought chunks being separated by inserted newlines
+- Fixed ACP tool results whose only content is an image losing their tool context, and fixed the fake ACP test agent reporting per-process instead of per-session usage
 
 ## [1.0.3] - 2026-10-05
 

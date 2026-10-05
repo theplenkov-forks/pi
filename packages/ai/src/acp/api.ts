@@ -60,6 +60,9 @@ class AcpEventConverter {
 	private thinkingIndex = -1;
 	private text = "";
 	private thinking = "";
+	/** Set when the other block kind writes, so the next write starts a new block. */
+	private afterText = false;
+	private afterThinking = false;
 
 	constructor(eventStream: AssistantMessageEventStream, model: Model<"acp">) {
 		this.eventStream = eventStream;
@@ -79,28 +82,23 @@ class AcpEventConverter {
 		this.eventStream.push({ type: "start", partial: this.partial });
 	}
 
+	// Each kind keeps one open block, but a write that follows the other kind
+	// starts a new block so ACP's own ordering survives into the message.
 	appendText(delta: string): void {
-		if (this.textIndex < 0) {
-			this.textIndex = this.partial.content.length;
-			this.partial.content.push({ type: "text", text: "" });
-			this.eventStream.push({ type: "text_start", contentIndex: this.textIndex, partial: this.partial });
-		}
+		if (this.textIndex < 0 || this.afterThinking) this.startText();
+		this.afterText = true;
+		this.afterThinking = false;
 		this.text += delta;
 		(this.partial.content[this.textIndex] as { text: string }).text = this.text;
 		this.eventStream.push({ type: "text_delta", contentIndex: this.textIndex, delta, partial: this.partial });
 	}
 
 	appendThinking(delta: string): void {
+		if (this.thinkingIndex < 0 || this.afterText) this.startThinking();
+		// Separator depends on the block opened above, so compute after starting it.
 		const line = this.thinking.length > 0 && !this.thinking.endsWith("\n") ? `\n${delta}` : delta;
-		if (this.thinkingIndex < 0) {
-			this.thinkingIndex = this.partial.content.length;
-			this.partial.content.push({ type: "thinking", thinking: "" });
-			this.eventStream.push({
-				type: "thinking_start",
-				contentIndex: this.thinkingIndex,
-				partial: this.partial,
-			});
-		}
+		this.afterThinking = true;
+		this.afterText = false;
 		this.thinking += line;
 		(this.partial.content[this.thinkingIndex] as { thinking: string }).thinking = this.thinking;
 		this.eventStream.push({
@@ -111,6 +109,20 @@ class AcpEventConverter {
 		});
 	}
 
+	private startText(): void {
+		this.textIndex = this.partial.content.length;
+		this.text = "";
+		this.partial.content.push({ type: "text", text: "" });
+		this.eventStream.push({ type: "text_start", contentIndex: this.textIndex, partial: this.partial });
+	}
+
+	private startThinking(): void {
+		this.thinkingIndex = this.partial.content.length;
+		this.thinking = "";
+		this.partial.content.push({ type: "thinking", thinking: "" });
+		this.eventStream.push({ type: "thinking_start", contentIndex: this.thinkingIndex, partial: this.partial });
+	}
+
 	handleUpdate(update: SessionUpdate): void {
 		switch (update.sessionUpdate) {
 			case "agent_message_chunk":
@@ -119,6 +131,7 @@ class AcpEventConverter {
 				break;
 			case "agent_thought_chunk":
 				if (update.content.type === "text") this.appendThinking(update.content.text);
+				else this.appendThinking(`[${update.content.type} content]`);
 				break;
 			case "tool_call":
 				this.appendThinking(
@@ -173,22 +186,18 @@ class AcpEventConverter {
 		if (result.turnUsage.costTotal !== undefined) usage.cost.total = result.turnUsage.costTotal;
 		this.partial.usage = usage;
 
-		if (this.textIndex >= 0) {
-			this.eventStream.push({
-				type: "text_end",
-				contentIndex: this.textIndex,
-				content: this.text,
-				partial: this.partial,
-			});
-		}
-		if (this.thinkingIndex >= 0) {
-			this.eventStream.push({
-				type: "thinking_end",
-				contentIndex: this.thinkingIndex,
-				content: this.thinking,
-				partial: this.partial,
-			});
-		}
+		this.partial.content.forEach((block, contentIndex) => {
+			if (block.type === "text") {
+				this.eventStream.push({ type: "text_end", contentIndex, content: block.text, partial: this.partial });
+			} else if (block.type === "thinking") {
+				this.eventStream.push({
+					type: "thinking_end",
+					contentIndex,
+					content: block.thinking,
+					partial: this.partial,
+				});
+			}
+		});
 
 		const stopReason = result.stopReason;
 		if (stopReason === "cancelled") {
@@ -199,10 +208,18 @@ class AcpEventConverter {
 			this.partial.stopReason = "error";
 			this.partial.errorMessage = "The agent refused to continue";
 			this.eventStream.push({ type: "error", reason: "error", error: this.partial });
+		} else if (stopReason === "max_tokens" || stopReason === "max_turn_requests") {
+			this.partial.stopReason = "length";
+			this.eventStream.push({ type: "done", reason: "length", message: this.partial });
+		} else if (stopReason === "end_turn") {
+			this.partial.stopReason = "stop";
+			this.eventStream.push({ type: "done", reason: "stop", message: this.partial });
 		} else {
-			const reason = stopReason === "end_turn" ? "stop" : "length";
-			this.partial.stopReason = reason;
-			this.eventStream.push({ type: "done", reason, message: this.partial });
+			// An unknown or newly added ACP stop reason must not read as a clean
+			// completion: report it instead of guessing.
+			this.partial.stopReason = "error";
+			this.partial.errorMessage = `The agent stopped with an unrecognized reason: ${stopReason}`;
+			this.eventStream.push({ type: "error", reason: "error", error: this.partial });
 		}
 	}
 
@@ -244,6 +261,7 @@ export function createAcpStreams(runner: AcpRunner = runAcpPrompt): ProviderStre
 					signal: options?.signal,
 					env: options?.env,
 					systemPrompt: getCurrentSystemPrompt(context.messages),
+					supportsImages: model.input.includes("image"),
 					...(blocks ? { blocks } : {}),
 					onUpdate: async (notification: SessionNotification) => {
 						if (!responded) {

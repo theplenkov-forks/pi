@@ -22,14 +22,16 @@ export function resolveAcpTransport(
 	provider: ModelAcpTransport | undefined,
 	model: ModelAcpTransport | undefined,
 ): AcpTransportConfig | undefined {
-	const command = model?.command ?? provider?.command;
+	// Reject a blank command here rather than at spawn, where it would surface
+	// as a misleading missing-executable error.
+	const command = (model?.command ?? provider?.command)?.trim();
 	if (!command) return undefined;
 	const args = model?.args ?? provider?.args;
 	const env = { ...provider?.env, ...model?.env };
 	return { command, ...(args !== undefined ? { args } : {}), ...(Object.keys(env).length > 0 ? { env } : {}) };
 }
 
-/** Split a command line into argv for error messages. Never executes anything. */
+/** Join the command and its args into a display string. Never parses or executes. */
 export function formatAcpCommand(transport: AcpTransportConfig): string {
 	return [transport.command, ...(transport.args ?? [])].join(" ");
 }

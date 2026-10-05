@@ -8,15 +8,23 @@
  * import so browser builds never follow it (see `../api.lazy.ts` pattern).
  */
 
-import { accessSync, constants } from "node:fs";
-import { delimiter, isAbsolute, join } from "node:path";
+import { accessSync, constants, statSync } from "node:fs";
+import { delimiter, extname, isAbsolute, join } from "node:path";
 import type { ApiKeyAuth, AuthCheck, AuthContext, AuthResult } from "../auth/types.ts";
 
-/** Binary part of a command string: `agent --flag` -> `agent`. */
+/** `command` is an executable, not a command line: keep the whole trimmed value. */
 function binaryName(command: string): string {
-	const trimmed = command.trim();
-	const firstSpace = trimmed.search(/\s/);
-	return firstSpace < 0 ? trimmed : trimmed.slice(0, firstSpace);
+	return command.trim();
+}
+
+/**
+ * Suffixes to try for a bare command name. An empty first entry tries the name
+ * exactly as configured (`agent.cmd`, extensionless scripts), then PATHEXT.
+ */
+function candidateSuffixes(binary: string): string[] {
+	if (process.platform !== "win32") return [""];
+	if (extname(binary)) return [""];
+	return ["", ...(process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";").filter(Boolean)];
 }
 
 /** Locate a binary on PATH. Returns the absolute path or undefined. */
@@ -25,19 +33,22 @@ export function findAcpCommand(command: string, pathValue?: string): string | un
 	if (!binary) return undefined;
 	if (isAbsolute(binary)) return isExecutable(binary) ? binary : undefined;
 	const path = pathValue ?? process.env.PATH ?? "";
-	const extensions = process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""];
+	const suffixes = candidateSuffixes(binary);
 	for (const dir of path.split(delimiter)) {
-		if (!dir) continue;
-		for (const extension of extensions) {
-			const candidate = join(dir, `${binary}${extension}`);
+		// An empty PATH entry means the current directory, as in POSIX shells.
+		const base = dir || ".";
+		for (const suffix of suffixes) {
+			const candidate = join(base, `${binary}${suffix}`);
 			if (isExecutable(candidate)) return candidate;
 		}
 	}
 	return undefined;
 }
 
+/** Executable and a regular file: a directory named like the agent is not one. */
 function isExecutable(path: string): boolean {
 	try {
+		if (!statSync(path).isFile()) return false;
 		accessSync(path, constants.X_OK);
 		return true;
 	} catch {
@@ -45,7 +56,7 @@ function isExecutable(path: string): boolean {
 	}
 }
 
-/** Split `argv[0]` for display without resolving. */
+/** Base name of a command, for display. */
 export function acpCommandName(command: string): string {
 	const binary = binaryName(command);
 	const base = binary.split("/").pop() ?? binary;
@@ -72,9 +83,10 @@ export function resolveAcpBinary(command: string | undefined, pathValue?: string
 export async function checkAcpCommand(
 	command: string | undefined,
 	input: { ctx: AuthContext; credential?: { env?: Record<string, string> }; signal: AbortSignal },
+	transportEnv?: Record<string, string>,
 ): Promise<AuthCheck | undefined> {
 	input.signal.throwIfAborted();
-	const resolved = resolveAcpBinary(command, input.credential?.env?.PATH);
+	const resolved = resolveAcpBinary(command, effectivePath(transportEnv, input.credential?.env));
 	if (!resolved) return undefined;
 	return { type: "api_key", source: `ACP command "${acpCommandName(resolved)}"` };
 }
@@ -86,22 +98,46 @@ export async function resolveAcpCommand(
 		credential?: { env?: Record<string, string> };
 		signal: AbortSignal;
 	},
+	transportEnv?: Record<string, string>,
 ): Promise<AuthResult | undefined> {
 	input.signal.throwIfAborted();
-	const resolved = resolveAcpBinary(command, input.credential?.env?.PATH);
+	const resolved = resolveAcpBinary(command, effectivePath(transportEnv, input.credential?.env));
 	if (!resolved) return undefined;
 	return {
 		auth: {},
-		env: input.credential?.env,
+		env: { ...transportEnv, ...input.credential?.env },
 		source: `ACP command "${acpCommandName(resolved)}"`,
 	};
 }
 
-/** ApiKeyAuth shape for ACP commands (Node runtime; loaded lazily by providers). */
-export function acpCommandAuth(name: string, getCommand: () => string | undefined): ApiKeyAuth {
+/**
+ * PATH the spawned agent will actually see. Configured transport `env.PATH`
+ * wins over the ambient process PATH, and a resolved credential overrides both.
+ */
+function effectivePath(
+	transportEnv: Record<string, string> | undefined,
+	credentialEnv: Record<string, string> | undefined,
+): string | undefined {
+	return typeof credentialEnv?.PATH === "string"
+		? credentialEnv.PATH
+		: typeof transportEnv?.PATH === "string"
+			? transportEnv.PATH
+			: undefined;
+}
+
+/**
+ * ApiKeyAuth shape for ACP commands (Node runtime; loaded lazily by providers).
+ * `getEnv` supplies the configured transport env so a command reachable only
+ * through it still counts as configured.
+ */
+export function acpCommandAuth(
+	name: string,
+	getCommand: () => string | undefined,
+	getEnv?: () => Record<string, string> | undefined,
+): ApiKeyAuth {
 	return {
 		name,
-		check: (input) => checkAcpCommand(getCommand(), input),
-		resolve: (input) => resolveAcpCommand(getCommand(), input),
+		check: (input) => checkAcpCommand(getCommand(), input, getEnv?.()),
+		resolve: (input) => resolveAcpCommand(getCommand(), input, getEnv?.()),
 	};
 }

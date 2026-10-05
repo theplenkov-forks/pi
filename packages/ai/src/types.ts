@@ -24,7 +24,9 @@ export type KnownApi =
 	| "bedrock-converse-stream"
 	| "google-generative-ai"
 	| "google-vertex"
-	| "pi-messages";
+	| "pi-messages"
+	/** Subprocess agents speaking the Agent Client Protocol (see `acp/`). */
+	| "acp";
 
 export type Api = KnownApi | (string & {});
 

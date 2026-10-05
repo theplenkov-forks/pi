@@ -2,10 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ACP (Agent Client Protocol) providers: any ACP-compatible CLI can be configured as a provider in `models.json` with `command`/`args`/`env` (`"api": "acp"`), per-model overrides, `modelOverrides`, and `include`/`exclude` id filters. Devin ships as a built-in `devin` provider (`devin acp`) with a dynamically discovered model catalog. Authenticate with `devin auth login`, then pick a `devin/…` model in `/model`. See [ACP agents](docs/providers.md#acp-agents) ([#10496](https://github.com/earendil-works/pi/issues/10496)).
+
 ### Fixed
 
 - Fixed syntax highlighting losing colors after the first line of multiline strings and comments in fenced code blocks ([#10143](https://github.com/earendil-works/pi/issues/10143))
 - Fixed ACP providers in `models.json` losing their command transport when a model entry omits `api`, ignoring provider-level `args`/`env` that layer over a builtin transport, rejecting `include`/`exclude`-only entries, and allowing a model-level `command` to bypass the `oauth` restriction
+- Fixed the packaged `rpc-entry` not registering the ACP subprocess modules, so ACP providers could not stream over RPC
+- Fixed ACP auth ignoring a configured transport `env.PATH` and treating a directory as an executable, so providers reachable only through configured env were reported as unconfigured
 
 ## [1.0.3] - 2026-10-05
 
@@ -21,7 +27,6 @@
 ### Added
 
 - Added Azure Foundry Chat Completions deployments, starting with `azure/deepseek-v4-pro` ([#9645](https://github.com/earendil-works/pi/issues/9645), [#9714](https://github.com/earendil-works/pi/pull/9714) by [@jsanter27](https://github.com/jsanter27))
-- Added ACP (Agent Client Protocol) providers: any ACP-compatible CLI can be configured as a provider in `models.json` with `command`/`args`/`env` (`"api": "acp"`), per-model overrides, `modelOverrides`, and `include`/`exclude` id filters. Devin ships as a built-in `devin` provider (`devin acp`) with a dynamically discovered model catalog. Authenticate with `devin auth login`, then pick a `devin/…` model in `/model`. See [ACP agents](docs/providers.md#acp-agents) ([#10496](https://github.com/earendil-works/pi/issues/10496)).
 
 ### Changed
 

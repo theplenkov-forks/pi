@@ -2,7 +2,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import { fetchAcpSessionInfo } from "../acp/api.lazy.ts";
 import { createAcpProvider } from "../acp/provider.ts";
 import type { Provider, RefreshModelsContext } from "../models.ts";
-import type { Model } from "../types.ts";
+import type { Model, ProviderEnv } from "../types.ts";
 import { DEVIN_ACP_ARGS, DEVIN_BASELINE_MODELS, DEVIN_COMMAND } from "./devin-catalog.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -35,13 +35,17 @@ export function devinModelsFromConfigOptions(
 	);
 	if (!select || select.type !== "select") return [];
 	const flat: acp.SessionConfigSelectOption[] = [];
-	for (const entry of select.options) {
-		if ("value" in entry) flat.push(entry as acp.SessionConfigSelectOption);
-		else if (isRecord(entry) && Array.isArray((entry as { options?: unknown }).options)) {
-			for (const nested of (entry as { options: unknown[] }).options) {
-				if (isRecord(nested) && typeof nested.value === "string")
-					flat.push(nested as unknown as acp.SessionConfigSelectOption);
-			}
+	for (const entry of select.options as unknown[]) {
+		// Narrow before reading: a malformed agent option must not abort discovery.
+		if (!isRecord(entry)) continue;
+		if (typeof entry.value === "string") {
+			flat.push(entry as unknown as acp.SessionConfigSelectOption);
+			continue;
+		}
+		if (!Array.isArray(entry.options)) continue;
+		for (const nested of entry.options) {
+			if (isRecord(nested) && typeof nested.value === "string")
+				flat.push(nested as unknown as acp.SessionConfigSelectOption);
 		}
 	}
 	const seen = new Set<string>();
@@ -67,7 +71,17 @@ export function devinModelsFromConfigOptions(
 }
 
 async function fetchDevinModels(context: RefreshModelsContext): Promise<readonly Model<"acp">[]> {
-	const info = await fetchAcpSessionInfo({ command: DEVIN_COMMAND, args: DEVIN_ACP_ARGS }, { signal: context.signal });
+	// Discovery authenticates exactly like a request: reuse the resolved
+	// credential env so WINDSURF_API_KEY-style auth reaches the agent.
+	// OAuthCredentials carries an index signature, so narrow before use.
+	const credentialEnv: ProviderEnv | undefined =
+		context.credential?.env && typeof context.credential.env === "object"
+			? (context.credential.env as ProviderEnv)
+			: undefined;
+	const info = await fetchAcpSessionInfo(
+		{ command: DEVIN_COMMAND, args: DEVIN_ACP_ARGS },
+		{ signal: context.signal, env: credentialEnv },
+	);
 	const models = devinModelsFromConfigOptions("devin", info.configOptions);
 	if (models.length === 0) throw new Error("Devin agent advertised no models");
 	return models;
@@ -86,5 +100,7 @@ export function devinProvider(): Provider<"acp"> {
 		transport: { command: DEVIN_COMMAND, args: DEVIN_ACP_ARGS },
 		models: DEVIN_BASELINE_MODELS,
 		fetchModels: fetchDevinModels,
+		// The agent lists what it serves, so its catalog replaces the offline baseline.
+		authoritativeCatalog: true,
 	});
 }

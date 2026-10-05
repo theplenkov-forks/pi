@@ -24,6 +24,8 @@ export interface AcpRunOptions {
 	signal?: AbortSignal;
 	env?: ProviderEnv;
 	systemPrompt?: string;
+	/** Model accepts image blocks. Defaults to true; omit images for text-only agents. */
+	supportsImages?: boolean;
 	/** Explicit prompt blocks (from `onPayload` replacement). Advances history like a normal turn. */
 	blocks?: acp.ContentBlock[];
 	onUpdate?: (notification: acp.SessionNotification) => void | Promise<void>;
@@ -55,6 +57,12 @@ interface PooledSession {
 	session: acp.ActiveSession;
 	/** Transcript messages already accepted by the agent. */
 	sentCount: number;
+	/**
+	 * Identity of the last message counted in `sentCount`. A transcript branch
+	 * or edit can keep the same length while changing history, so identity —
+	 * not length — decides whether the ACP session still matches.
+	 */
+	lastSent?: Message;
 	/** System prompt the session was created with. */
 	systemPrompt?: string;
 	consumed: ConsumedTotals;
@@ -65,6 +73,8 @@ interface PooledConnection {
 	connection: acp.ClientConnection;
 	sessions: Map<string, PooledSession>;
 	activeTurns: number;
+	/** Signal of the turn currently running on this connection, if any. */
+	turnSignal?: AbortSignal;
 }
 
 const pool = new Map<string, PooledConnection>();
@@ -136,6 +146,8 @@ async function establishTransport(
 	transport: AcpTransportConfig,
 	options: AcpRunOptions,
 ): Promise<PooledConnection> {
+	/** Set once the entry exists, for handlers that need the live turn state. */
+	let current: PooledConnection | undefined;
 	const existing = pool.get(key);
 	if (existing && !existing.connection.signal.aborted) return existing;
 	if (existing) {
@@ -182,7 +194,10 @@ async function establishTransport(
 	const app = acp
 		.client({ name: "pi" })
 		.onRequest(acp.methods.client.session.requestPermission, (ctx) => {
-			if (ctx.signal.aborted || options.signal?.aborted) return { outcome: { outcome: "cancelled" } };
+			// Consult the running turn's signal, not the one captured when the
+			// process was spawned: an earlier turn's abort must not cancel
+			// permission requests for later turns on the same connection.
+			if (ctx.signal.aborted || current?.turnSignal?.aborted) return { outcome: { outcome: "cancelled" } };
 			const choices = ctx.params.options;
 			const pick =
 				choices.find((option) => option.kind === "allow_once") ??
@@ -215,7 +230,7 @@ async function establishTransport(
 	const webOutput = Readable.toWeb(proc.stdout) as ReadableStream<Uint8Array>;
 	const connection = app.connect(acp.ndJsonStream(webInput, webOutput));
 	const entry: PooledConnection = { proc, connection, sessions: new Map(), activeTurns: 0 };
-	pool.set(key, entry);
+	current = entry;
 	ensureExitHook();
 	// Connections start referenced; each finished turn unrefs while idle.
 
@@ -231,16 +246,30 @@ async function establishTransport(
 
 	try {
 		throwIfAborted(options.signal);
-		await connection.agent.request(acp.methods.agent.initialize, {
-			protocolVersion: acp.PROTOCOL_VERSION,
-			clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
-		});
+		// Aborting the handshake must not leave the subprocess running.
+		const onAbortDuringInit = () => {
+			connection.close();
+			proc.kill();
+		};
+		options.signal?.addEventListener("abort", onAbortDuringInit, { once: true });
+		try {
+			await connection.agent.request(acp.methods.agent.initialize, {
+				protocolVersion: acp.PROTOCOL_VERSION,
+				clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } },
+			});
+		} finally {
+			options.signal?.removeEventListener("abort", onAbortDuringInit);
+		}
+		throwIfAborted(options.signal);
 	} catch (error) {
 		if (pool.get(key) === entry) pool.delete(key);
 		connection.close();
 		proc.kill();
 		throw new Error(`ACP agent "${label}" failed to initialize: ${error instanceof Error ? error.message : error}`);
 	}
+	// Publish only after the handshake: a pooled entry must never hand out a
+	// connection whose agent has not completed `initialize`.
+	pool.set(key, entry);
 	return entry;
 }
 
@@ -336,6 +365,15 @@ function toPromptResult(
 	return { stopReason: response.stopReason, turnUsage };
 }
 
+/** Drop a pooled ACP session and close it on the agent side. */
+function retireSession(entry: PooledConnection, sessionKey: string, state: PooledSession): void {
+	if (entry.sessions.get(sessionKey) === state) entry.sessions.delete(sessionKey);
+	state.session.dispose();
+	void entry.connection.agent
+		.request(acp.methods.agent.session.close, { sessionId: state.session.sessionId })
+		.catch(() => {});
+}
+
 /** Close every pooled process. Used by tests; pi itself keeps the pool for its lifetime. */
 export async function closeAcpPool(): Promise<void> {
 	const entries = [...pool.values()];
@@ -382,14 +420,22 @@ async function runTurn(
 ): Promise<AcpPromptResult> {
 	const sessionKey = options.sessionKey ?? `ephemeral-${Date.now()}-${Math.floor(Math.random() * 2 ** 32)}`;
 	const ephemeral = options.sessionKey === undefined;
+	const cancellationSignal = options.signal;
 
 	const systemPrompt = options.systemPrompt?.trim() || undefined;
 	let state = entry.sessions.get(sessionKey);
-	if (state && (messages.length < state.sentCount || (systemPrompt && systemPrompt !== state.systemPrompt))) {
-		// Transcript rewind (compaction, restore) or a changed system prompt:
-		// the agent's context is stale either way, so drop the session.
-		entry.sessions.delete(sessionKey);
-		state.session.dispose();
+	// A shorter transcript is a rewind (compaction, restore); a same-length
+	// transcript whose last sent message changed is a branch or an edit. A
+	// changed system prompt also invalidates what the agent was told. All three
+	// leave the ACP session's context stale.
+	const diverged =
+		state !== undefined &&
+		state.sentCount > 0 &&
+		(messages.length < state.sentCount ||
+			(messages.length === state.sentCount && messages[state.sentCount - 1] !== state.lastSent) ||
+			(systemPrompt !== undefined && systemPrompt !== state.systemPrompt));
+	if (diverged && state) {
+		retireSession(entry, sessionKey, state);
 		state = undefined;
 	}
 	if (!state) {
@@ -402,6 +448,9 @@ async function runTurn(
 				consumed: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
 			};
 		} catch (error) {
+			if (cancellationSignal?.aborted) {
+				throw new Error(`ACP agent "${label}" session creation was cancelled`);
+			}
 			throw new Error(
 				`ACP agent "${label}" failed to create a session: ${error instanceof Error ? error.message : error}`,
 			);
@@ -418,27 +467,33 @@ async function runTurn(
 		while (ownReplies < delta.length && delta[ownReplies]?.role === "assistant") ownReplies++;
 		delta = delta.slice(ownReplies);
 	}
+	const supportsImages = options.supportsImages ?? true;
 	let blocks =
 		options.blocks ??
 		transcriptToAcpPrompt(delta, {
 			systemPrompt: state.sentCount === 0 ? options.systemPrompt : undefined,
+			supportsImages,
 		});
-	if (blocks.length === 0) blocks = transcriptToAcpPrompt(messages);
+	if (blocks.length === 0) blocks = transcriptToAcpPrompt(messages, { supportsImages });
 	if (blocks.length === 0) throw new Error(`ACP agent "${label}" received an empty prompt`);
 	// Advance only after the agent accepts the turn: on a failed prompt or a
 	// cancellation the next turn must still carry these messages.
 	const previousSentCount = state.sentCount;
 	state.sentCount = messages.length;
+	state.lastSent = messages[state.sentCount - 1];
 
 	const active = state.session;
-	const cancellationSignal = options.signal;
-	const responsePromise = active.prompt(blocks, cancellationSignal ? { cancellationSignal } : undefined);
 	const cancelListener = () => {
 		void entry.connection.agent
 			.notify(acp.methods.agent.session.cancel, { sessionId: active.sessionId })
 			.catch(() => {});
 	};
+	const responsePromise = active.prompt(blocks, cancellationSignal ? { cancellationSignal } : undefined);
+	// The prompt response is only awaited on the `stop` path; keep a handler
+	// attached so a later rejection never surfaces as an unhandled rejection.
+	responsePromise.catch(() => {});
 	cancellationSignal?.addEventListener("abort", cancelListener, { once: true });
+	entry.turnSignal = cancellationSignal;
 	let latestCost: number | undefined;
 	try {
 		for (;;) {
@@ -455,23 +510,25 @@ async function runTurn(
 		}
 	} catch (error) {
 		if (cancellationSignal?.aborted) {
-			// How much of the prompt the agent consumed is unknown, so the whole
-			// session goes: keeping it would resend on top of partial state.
-			if (entry.sessions.get(sessionKey) === state) entry.sessions.delete(sessionKey);
-			active.dispose();
+			// Cancel and settle the in-flight prompt, then retire the session: how
+			// much of the prompt the agent consumed is unknown, so reusing it
+			// would overlap turns or resend on top of partial state.
+			cancelListener();
+			await responsePromise.catch(() => {});
+			if (entry.sessions.get(sessionKey) === state) retireSession(entry, sessionKey, state);
 			return { stopReason: "cancelled", turnUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 		}
+		// Streaming failed: stop the agent's turn before reporting the error, so
+		// its updates cannot overlap the next prompt.
+		cancelListener();
+		await responsePromise.catch(() => {});
 		// Resend on the next turn: the rejected blocks were never accepted.
 		state.sentCount = previousSentCount;
+		state.lastSent = messages[previousSentCount - 1];
 		throw new Error(`ACP agent "${label}" prompt failed: ${error instanceof Error ? error.message : error}`);
 	} finally {
+		entry.turnSignal = undefined;
 		cancellationSignal?.removeEventListener("abort", cancelListener);
-		if (ephemeral) {
-			entry.sessions.delete(sessionKey);
-			active.dispose();
-			void entry.connection.agent
-				.request(acp.methods.agent.session.close, { sessionId: active.sessionId })
-				.catch(() => {});
-		}
+		if (ephemeral) retireSession(entry, sessionKey, state);
 	}
 }

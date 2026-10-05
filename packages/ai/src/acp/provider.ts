@@ -39,20 +39,24 @@ async function loadAuthModule(): Promise<AcpAuthModule | undefined> {
 }
 
 /** Command-based auth with a lazily loaded binary check. No login flow. */
-export function acpCommandAuth(name: string, getCommand: () => string | undefined): ApiKeyAuth {
+export function acpCommandAuth(
+	name: string,
+	getCommand: () => string | undefined,
+	getEnv?: () => Record<string, string> | undefined,
+): ApiKeyAuth {
 	return {
 		name,
 		check: async (input) => {
 			input.signal.throwIfAborted();
 			const module = await loadAuthModule();
 			if (!module) return undefined;
-			return module.checkAcpCommand(getCommand(), input);
+			return module.checkAcpCommand(getCommand(), input, getEnv?.());
 		},
 		resolve: async (input) => {
 			input.signal.throwIfAborted();
 			const module = await loadAuthModule();
 			if (!module) return undefined;
-			return module.resolveAcpCommand(getCommand(), input);
+			return module.resolveAcpCommand(getCommand(), input, getEnv?.());
 		},
 	};
 }
@@ -79,6 +83,12 @@ export interface AcpProviderOptions {
 	 * restores the persisted snapshot offline and publishes fetched models.
 	 */
 	fetchModels?: (context: RefreshModelsContext) => Promise<readonly Model<"acp">[]>;
+	/**
+	 * Treat `models` as an offline fallback when `fetchModels` is set: the agent
+	 * advertises the authoritative catalog, so a successful refresh replaces the
+	 * baseline instead of merging with it.
+	 */
+	authoritativeCatalog?: boolean;
 }
 
 function zeroCost(): ModelCost {
@@ -118,9 +128,16 @@ export function createAcpProvider(options: AcpProviderOptions): Provider<"acp"> 
 	return createProvider<"acp">({
 		id: options.id,
 		name: options.name ?? options.id,
-		auth: { apiKey: acpCommandAuth(options.name ?? options.id, () => transport.command) },
+		auth: {
+			apiKey: acpCommandAuth(
+				options.name ?? options.id,
+				() => transport.command,
+				() => transport.env,
+			),
+		},
 		models: options.models.map((definition) => acpChatModel(options.id, transport, definition)),
 		fetchModels: options.fetchModels,
+		replaceBaselineOnDynamicCatalog: options.authoritativeCatalog && options.fetchModels !== undefined,
 		api: acpApi(),
 	});
 }

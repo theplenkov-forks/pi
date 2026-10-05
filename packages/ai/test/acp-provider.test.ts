@@ -58,9 +58,14 @@ describe("devinProvider", () => {
 		expect(models[0]?.acp).toEqual({ command: "devin", args: ["acp", "--model", "adaptive"] });
 		expect(provider.auth.apiKey?.login).toBeUndefined();
 		expect(typeof provider.refreshModels).toBe("function");
-		// Unresolvable command: unconfigured, not broken.
+		// Unresolvable command: unconfigured, not broken. An empty PATH keeps the
+		// result independent of the ambient environment.
 		const { acpCommandAuth: checkAuth } = await import("../src/acp/provider.ts");
-		const missing = checkAuth("Devin", () => "no-such-acp-binary-xyz");
+		const missing = checkAuth(
+			"Devin",
+			() => "no-such-acp-binary-xyz",
+			() => ({ PATH: "" }),
+		);
 		expect(
 			await missing.check?.({
 				ctx: { env: async () => undefined, fileExists: async () => false },
@@ -84,6 +89,10 @@ describe("devinProvider", () => {
 					{ value: "gpt-6-sol-none", name: "GPT-6 Sol No Thinking" },
 					{ value: "", name: "Empty" },
 					{ value: "adaptive", name: "Adaptive duplicate" },
+					// Grouped options flatten to their nested entries.
+					{ name: "Group", options: [{ value: "grouped-model", name: "Grouped" }] } as never,
+					// A non-object entry must not abort discovery.
+					"bogus" as never,
 				],
 			},
 		]);
@@ -91,6 +100,7 @@ describe("devinProvider", () => {
 			["adaptive", "Adaptive", ["text", "image"], false, ["acp", "--model", "adaptive"]],
 			["swe-2-high", "SWE-2", ["text"], true, ["acp", "--model", "swe-2-high"]],
 			["gpt-6-sol-none", "GPT-6 Sol No Thinking", ["text"], false, ["acp", "--model", "gpt-6-sol-none"]],
+			["grouped-model", "Grouped", ["text"], false, ["acp", "--model", "grouped-model"]],
 		]);
 	});
 

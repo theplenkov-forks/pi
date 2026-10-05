@@ -239,7 +239,9 @@ Per-model `args`/`env`/`command` override the provider level, e.g. `"args": ["ac
 }
 ```
 
-The agent owns its tools, plans, and permissions; Pi forwards your messages and renders the agent's replies. Availability in `/model` means the command resolves on `PATH`; a missing binary surfaces as a request error naming the command.
+The agent owns its tools, plans, and permissions; Pi forwards your messages and renders the agent's replies.
+
+What Pi implements is the client half of ACP 1.x: file read/write access and permission requests, where every request is auto-approved (`allow_once` when the agent offers it). Pi does not expose the terminal capability, so agents that require Pi to run commands on their behalf are not supported.
 
 Narrow a noisy catalog with case-insensitive substring filters on model IDs (ACP providers only; the persisted snapshot stays complete, reads are filtered):
 
@@ -254,4 +256,6 @@ Narrow a noisy catalog with case-insensitive substring filters on model IDs (ACP
 }
 ```
 
-`include` keeps only matching IDs, `exclude` drops them. There is no cost-based filter: ACP does not report pricing, so all costs read zero (a turn total appears only when the agent reports cumulative USD cost).
+`include` keeps only matching IDs, `exclude` drops them. There is no cost-based filter: ACP reports no pricing, so costs default to zero unless you set a `cost` on the model in `models.json`. A turn total appears only when the agent reports cumulative USD cost.
+
+A missing `command` binary makes the provider unavailable: it does not appear as configured in `/model`, and requests report that the provider is not configured. Check the spelling, or point `command` at an absolute or working-directory-relative path (`"/opt/my-agent/acp"`, `"./tools/my-agent"`).

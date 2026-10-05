@@ -1,13 +1,26 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { devinProvider } from "@earendil-works/pi-ai/providers/devin";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { ModelConfig } from "../src/core/model-config.ts";
 import { composeModelProvider } from "../src/core/provider-composer.ts";
 
+const tempDirs: string[] = [];
+
+afterEach(() => {
+	for (const dir of tempDirs.splice(0)) {
+		try {
+			rmSync(dir, { recursive: true, force: true });
+		} catch {
+			// Best-effort cleanup.
+		}
+	}
+});
+
 function loadConfig(modelsJson: unknown): Promise<ModelConfig> {
 	const dir = mkdtempSync(join(tmpdir(), "acp-models-"));
+	tempDirs.push(dir);
 	const path = join(dir, "models.json");
 	writeFileSync(path, JSON.stringify(modelsJson));
 	return ModelConfig.load(path);
@@ -177,6 +190,21 @@ describe("ACP models.json support", () => {
 			},
 		});
 		expect(() => composeModelProvider("my-agent", undefined, config, undefined)).toThrow("cannot be combined");
+	});
+
+	it("uses a configured command override for auth even when the builtin has command auth", async () => {
+		const config = await loadConfig({
+			providers: { devin: { command: "no-such-acp-binary-xyz", env: { PATH: "" } } },
+		});
+		const provider = composeModelProvider("devin", devinProvider(), config, undefined);
+		// The override replaces the builtin's `devin` command, so availability must
+		// follow the override rather than the binary installed on this machine.
+		expect(
+			await provider.auth.apiKey?.check?.({
+				ctx: { env: async () => undefined, fileExists: async () => false },
+				signal: new AbortController().signal,
+			}),
+		).toBeUndefined();
 	});
 
 	it("rejects include/exclude on non-ACP providers", async () => {

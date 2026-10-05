@@ -72,6 +72,46 @@ describe("createAcpStreams", () => {
 		expect(message.usage.cost.total).toBeCloseTo((100 * 3 + 50 * 12) / 1000000, 10);
 	});
 
+	it("keeps text and thinking blocks in the agent's order", async () => {
+		const streams = createAcpStreams(
+			runnerFor([textChunk("a"), thoughtChunk("plan"), textChunk("b"), thoughtChunk("more")], {
+				stopReason: "end_turn",
+				turnUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			}),
+		);
+		const message = await streams
+			.streamSimple(
+				createModel(),
+				normalizeContext({ messages: [{ role: "user", content: "Hi", timestamp: 1 }] }),
+				{},
+			)
+			.result();
+		expect(message.content).toEqual([
+			{ type: "text", text: "a" },
+			{ type: "thinking", thinking: "plan" },
+			{ type: "text", text: "b" },
+			{ type: "thinking", thinking: "more" },
+		]);
+	});
+
+	it("reports an unrecognized agent stop reason instead of a clean finish", async () => {
+		const streams = createAcpStreams(
+			runnerFor([], {
+				stopReason: "brand_new_reason" as never,
+				turnUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			}),
+		);
+		const message = await streams
+			.streamSimple(
+				createModel(),
+				normalizeContext({ messages: [{ role: "user", content: "Hi", timestamp: 1 }] }),
+				{},
+			)
+			.result();
+		expect(message.stopReason).toBe("error");
+		expect(message.errorMessage).toContain("brand_new_reason");
+	});
+
 	it("renders tool calls as thinking and overrides cost with the agent total", async () => {
 		const streams = createAcpStreams(
 			runnerFor(
@@ -110,8 +150,12 @@ describe("createAcpStreams", () => {
 			.result();
 
 		expect(message.stopReason).toBe("stop");
-		expect(message.content).toHaveLength(1);
-		expect(message.content[0]?.type).toBe("thinking");
+		expect(message.content).toEqual([
+			{
+				type: "thinking",
+				thinking: "Tool: Reading file [in_progress]\nTool call_1 -> completed\ndone",
+			},
+		]);
 		expect(message.usage.cost.total).toBe(0.045);
 	});
 
@@ -142,18 +186,25 @@ describe("createAcpStreams", () => {
 		expect(message.stopReason).toBe("length");
 	});
 
-	it("maps cancellation to aborted", async () => {
+	it("maps an aborted request to aborted and forwards the signal to the runner", async () => {
 		const controller = new AbortController();
-		const streams = createAcpStreams(
-			runnerFor([], { stopReason: "cancelled", turnUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }),
+		let sawSignal: AbortSignal | undefined;
+		const streams = createAcpStreams(async (_transport, _messages, options) => {
+			sawSignal = options?.signal;
+			// An aborted request must not report a clean finish.
+			expect(controller.signal.aborted).toBe(true);
+			return { stopReason: "cancelled", turnUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+		});
+		const pending = streams.streamSimple(
+			createModel(),
+			normalizeContext({ messages: [{ role: "user", content: "Hi", timestamp: 1 }] }),
+			{ signal: controller.signal },
 		);
 		controller.abort();
-		const message = await streams
-			.streamSimple(createModel(), normalizeContext({ messages: [{ role: "user", content: "Hi", timestamp: 1 }] }), {
-				signal: controller.signal,
-			})
-			.result();
+		const message = await pending.result();
+		expect(sawSignal).toBe(controller.signal);
 		expect(message.stopReason).toBe("aborted");
+		expect(message.errorMessage).toBe("Request aborted");
 	});
 
 	it("errors when the model has no ACP command", async () => {
@@ -172,11 +223,12 @@ describe("createAcpStreams", () => {
 		const seen: unknown[] = [];
 		let responseStatus = 0;
 		let receivedBlocks: unknown;
+		const emitted = textChunk("Hi");
 		const streams = createAcpStreams(async (transport, messages, options) => {
 			expect(transport.command).toBe("devin");
 			expect(messages).toHaveLength(1);
 			receivedBlocks = options?.blocks;
-			await options?.onUpdate?.(textChunk("Hi"));
+			await options?.onUpdate?.(emitted);
 			return { stopReason: "end_turn", turnUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
 		});
 		const message = await streams
@@ -192,7 +244,32 @@ describe("createAcpStreams", () => {
 			.result();
 		expect(message.stopReason).toBe("stop");
 		expect(receivedBlocks).toEqual([{ type: "text", text: "replaced" }]);
-		expect(seen).toHaveLength(1);
+		// The raw notification, not a converted or partial event.
+		expect(seen).toEqual([emitted]);
 		expect(responseStatus).toBe(200);
+	});
+
+	it("tells the runner whether the model accepts images", async () => {
+		let supportsImages: boolean | undefined;
+		const streams = createAcpStreams(async (_transport, _messages, options) => {
+			supportsImages = options?.supportsImages;
+			return { stopReason: "end_turn", turnUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+		});
+		await streams
+			.streamSimple(
+				{ ...createModel(), input: ["text", "image"] },
+				normalizeContext({ messages: [{ role: "user", content: "Hi", timestamp: 1 }] }),
+				{},
+			)
+			.result();
+		expect(supportsImages).toBe(true);
+		await streams
+			.streamSimple(
+				createModel(),
+				normalizeContext({ messages: [{ role: "user", content: "Hi", timestamp: 1 }] }),
+				{},
+			)
+			.result();
+		expect(supportsImages).toBe(false);
 	});
 });

@@ -316,12 +316,15 @@ function findModelDefaults(models: readonly AnyModel[], modelId: string, api?: A
 function findExtensionModelDefaults(
 	models: readonly AnyModel[],
 	definition: ProviderModelConfig,
+	providerApi?: Api,
 ): AnyModel | undefined {
 	const type = definition.type ?? "chat";
+	const effectiveApi = definition.api ?? providerApi;
 	const candidates = models.filter((model) => isModelType(model, type));
 	return (
+		candidates.find((model) => model.id === definition.id && (!effectiveApi || model.api === effectiveApi)) ??
+		(effectiveApi ? candidates.find((model) => model.api === effectiveApi) : undefined) ??
 		candidates.find((model) => model.id === definition.id) ??
-		(definition.api ? candidates.find((model) => model.api === definition.api) : undefined) ??
 		(type === "chat" ? candidates.find((model) => model.api === "openai-completions") : undefined) ??
 		candidates[0]
 	);
@@ -334,8 +337,11 @@ function extensionModelFromDefinition(
 	definition: ProviderModelConfig,
 ): AnyModel {
 	const type = definition.type ?? "chat";
-	const defaults = findExtensionModelDefaults(models, definition);
-	const api = definition.api ?? (type === "chat" ? config.api : undefined) ?? defaults?.api;
+	const providerApi = type === "chat" ? config.api : undefined;
+	// Provider-level `api: "acp"` decides the api even when the candidate default
+	// matches by id only, so select defaults against the effective api.
+	const defaults = findExtensionModelDefaults(models, definition, providerApi);
+	const api = definition.api ?? providerApi ?? defaults?.api;
 	if (!api) {
 		throw new Error(
 			`Provider ${providerId}, model ${definition.id}: no "api" specified. Set it at model level${type === "chat" ? " or provider level" : ""}.`,
@@ -590,13 +596,42 @@ function rawModelHeaders(
 	return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
-/** First ACP command visible for a provider: provider-level, model-level, then base models. */
+/** ACP command explicitly configured in models.json, ignoring inherited models. */
+function acpConfiguredCommand(config: ModelsJsonProvider | undefined): string | undefined {
+	if (config?.command) return config.command;
+	for (const definition of config?.models ?? []) {
+		if (definition.command) return definition.command;
+	}
+	for (const override of Object.values(config?.modelOverrides ?? {})) {
+		if (override.command) return override.command;
+	}
+	return undefined;
+}
+
+/** First ACP command visible for a provider: provider-level, model-level, overrides, then base models. */
 function acpProviderCommand(base: Provider | undefined, config: ModelsJsonProvider | undefined): string | undefined {
 	if (config?.command) return config.command;
 	for (const definition of config?.models ?? []) {
 		if (definition.command) return definition.command;
 	}
-	return getAllProviderModels(base).find((model) => model.api === "acp")?.acp?.command;
+	// modelOverrides replace a model's transport, so an override command wins over
+	// the base model's command.
+	for (const model of getAllProviderModels(base)) {
+		if (model.api !== "acp") continue;
+		const override = config?.modelOverrides?.[model.id];
+		if (override?.command) return override.command;
+		if (model.acp?.command) return model.acp.command;
+	}
+	return undefined;
+}
+
+/** Transport env configured for a provider: provider level, then any model entry. */
+function acpProviderEnv(config: ModelsJsonProvider | undefined): Record<string, string> | undefined {
+	if (config?.env) return config.env;
+	for (const definition of config?.models ?? []) {
+		if (definition.env) return definition.env;
+	}
+	return undefined;
 }
 
 /** Whether a provider serves ACP models from any layer. */
@@ -677,9 +712,24 @@ export function composeModelProvider(
 	getAllModels();
 	const displayName = extension?.name ?? config?.name ?? base?.name ?? extension?.oauth?.name ?? providerId;
 	let apiKey: ApiKeyAuth | undefined;
-	if (usesAcpTransport(base, config) && configuredApiKey(config, extension) === undefined && !base?.auth.apiKey) {
+	// A models.json command replaces the builtin's, so it must also replace the
+	// inherited command auth — otherwise the old command gates availability.
+	const configuredCommand = acpConfiguredCommand(config);
+	const baseCommand = getAllProviderModels(base).find((model) => model.api === "acp")?.acp?.command;
+	const overridesBaseCommand = configuredCommand !== undefined && configuredCommand !== baseCommand;
+	if (
+		usesAcpTransport(base, config) &&
+		configuredApiKey(config, extension) === undefined &&
+		(overridesBaseCommand || !base?.auth.apiKey)
+	) {
 		const command = acpProviderCommand(base, config);
-		if (command) apiKey = acpCommandAuth(displayName, () => acpProviderCommand(base, config));
+		if (command) {
+			apiKey = acpCommandAuth(
+				displayName,
+				() => acpProviderCommand(base, config),
+				() => acpProviderEnv(config),
+			);
+		}
 	}
 	apiKey ??= composeApiKeyAuth(providerId, base, config, extension);
 	const oauth = composeOAuthAuth(providerId, base, config, extension);

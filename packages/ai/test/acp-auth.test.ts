@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { acpCommandAuth, acpCommandName, findAcpCommand } from "../src/acp/auth.ts";
+import { acpCommandAuth, acpCommandName, findAcpCommand, resolveAcpBinary } from "../src/acp/auth.ts";
 
 const tempDirs: string[] = [];
 
@@ -42,9 +42,41 @@ describe("findAcpCommand", () => {
 	it("resolves bare names on PATH", () => {
 		const dir = mkdtempSync(join(tmpdir(), "acp-auth-"));
 		tempDirs.push(dir);
-		makeExecutable(dir, "my-agent");
+		// On Windows only PATHEXT-suffixed names resolve, so name the fixture accordingly.
+		makeExecutable(dir, process.platform === "win32" ? "my-agent.cmd" : "my-agent");
 		expect(findAcpCommand("my-agent", dir)).toContain("my-agent");
 		expect(findAcpCommand("no-such-agent", dir)).toBeUndefined();
+	});
+
+	it("ignores directories that share the command name", () => {
+		const dir = mkdtempSync(join(tmpdir(), "acp-auth-"));
+		tempDirs.push(dir);
+		mkdirSync(join(dir, "fake-agent"));
+		expect(findAcpCommand("fake-agent", dir)).toBeUndefined();
+	});
+
+	it("resolves a command given as a working-directory-relative path", () => {
+		const dir = mkdtempSync(join(tmpdir(), "acp-auth-"));
+		tempDirs.push(dir);
+		makeExecutable(dir, "local-agent");
+		const previousCwd = process.cwd();
+		try {
+			process.chdir(dir);
+			expect(resolveAcpBinary("./local-agent")).toContain("local-agent");
+		} finally {
+			process.chdir(previousCwd);
+		}
+	});
+});
+
+describe("resolveAcpBinary", () => {
+	it("keeps spaces in the executable path", () => {
+		const dir = mkdtempSync(join(tmpdir(), "acp-auth-"));
+		tempDirs.push(dir);
+		const spaced = join(dir, "My Agent");
+		mkdirSync(spaced);
+		const binary = makeExecutable(spaced, "acp");
+		expect(resolveAcpBinary(binary)).toBe(binary);
 	});
 });
 
@@ -72,9 +104,31 @@ describe("acpCommandAuth", () => {
 	});
 
 	it("reports unconfigured when the command is missing", async () => {
-		const auth = acpCommandAuth("Devin", () => "no-such-acp-binary-xyz");
+		// An empty PATH makes the result independent of the ambient environment.
+		const auth = acpCommandAuth(
+			"Devin",
+			() => "no-such-acp-binary-xyz",
+			() => ({ PATH: "" }),
+		);
 		expect(await auth.check?.({ ...testContext(), credential: undefined })).toBeUndefined();
 		expect(await auth.resolve?.({ ...testContext(), credential: undefined })).toBeUndefined();
 		expect(auth.login).toBeUndefined();
+	});
+
+	it("finds a command reachable only through the configured transport env", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "acp-auth-"));
+		tempDirs.push(dir);
+		makeExecutable(dir, "env-agent");
+		const auth = acpCommandAuth(
+			"Agent",
+			() => "env-agent",
+			() => ({ PATH: dir }),
+		);
+		expect(await auth.check?.({ ...testContext(), credential: undefined })).toEqual({
+			type: "api_key",
+			source: 'ACP command "env-agent"',
+		});
+		// The configured env is handed to the request, not just used for lookup.
+		expect((await auth.resolve?.({ ...testContext(), credential: undefined }))?.env).toEqual({ PATH: dir });
 	});
 });

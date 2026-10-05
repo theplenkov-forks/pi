@@ -16,6 +16,7 @@ function assistantText(message: Extract<Message, { role: "assistant" }>): string
 	return message.content
 		.map((block) => {
 			if (block.type === "text") return block.text;
+			if (block.type === "thinking") return `Thinking: ${block.thinking}`;
 			if (block.type === "toolCall") return `Tool call \`${block.name}\`: ${JSON.stringify(block.arguments)}`;
 			return "";
 		})
@@ -23,10 +24,20 @@ function assistantText(message: Extract<Message, { role: "assistant" }>): string
 		.join("\n\n");
 }
 
-function toolResultText(message: Extract<Message, { role: "toolResult" }>): string {
-	const text = contentText(message.content);
+/**
+ * Tool-result blocks. Text becomes the labelled quoted form; images are kept as
+ * image blocks so a vision-capable ACP agent can still inspect them.
+ */
+function toolResultBlocks(message: Extract<Message, { role: "toolResult" }>, supportsImages: boolean): ContentBlock[] {
 	const label = message.isError ? "Tool error" : "Tool result";
-	return `${label} \`${message.toolName}\`: ${text}`;
+	const blocks: ContentBlock[] = [];
+	const text = contentText(message.content);
+	if (text.length > 0) blocks.push({ type: "text", text: `${label} \`${message.toolName}\`: ${text}` });
+	if (!supportsImages || typeof message.content === "string") return blocks;
+	for (const block of message.content) {
+		if (block.type === "image") blocks.push({ type: "image", data: block.data, mimeType: block.mimeType });
+	}
+	return blocks;
 }
 
 /**
@@ -35,11 +46,14 @@ function toolResultText(message: Extract<Message, { role: "toolResult" }>): stri
  */
 export function transcriptToAcpPrompt(
 	messages: readonly Message[],
-	options?: { systemPrompt?: string },
+	options?: { systemPrompt?: string; supportsImages?: boolean },
 ): ContentBlock[] {
 	const blocks: ContentBlock[] = [];
-	const systemPrompt = options?.systemPrompt?.trim();
-	if (systemPrompt) blocks.push({ type: "text", text: systemPrompt });
+	const systemPrompt = options?.systemPrompt;
+	// Send the prompt verbatim; only skip it when there is nothing but whitespace.
+	if (systemPrompt && systemPrompt.trim().length > 0) blocks.push({ type: "text", text: systemPrompt });
+	// A text-only ACP model rejects image blocks, so images are omitted for it.
+	const supportsImages = options?.supportsImages ?? true;
 
 	for (const message of messages) {
 		if (message.role === "system") continue;
@@ -55,6 +69,7 @@ export function transcriptToAcpPrompt(
 					text += block.text;
 					continue;
 				}
+				if (!supportsImages) continue;
 				if (text.trim().length > 0) {
 					blocks.push({ type: "text", text });
 					text = "";
@@ -69,8 +84,7 @@ export function transcriptToAcpPrompt(
 			if (text.length > 0) blocks.push({ type: "text", text: `Assistant: ${text}` });
 			continue;
 		}
-		const text = toolResultText(message);
-		if (text.length > 0) blocks.push({ type: "text", text });
+		blocks.push(...toolResultBlocks(message, supportsImages));
 	}
 	return blocks;
 }

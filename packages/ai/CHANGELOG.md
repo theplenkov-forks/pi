@@ -10,7 +10,9 @@
 
 - Fixed Bedrock requests that fail with `The pending stream has been canceled` after a stalled HTTP/2 connection not being retried automatically ([#10379](https://github.com/earendil-works/pi/issues/10379))
 - Fixed ACP agent commands given as a working-directory-relative path (`./tools/agent`) failing to spawn even though auth reported the provider as configured
-- Fixed ACP transcript conversion reordering interleaved text and image parts
+- Fixed ACP transcript conversion reordering interleaved text and image parts, dropping assistant thinking and tool-result images from replayed history, and sending image blocks to text-only agents
+- Fixed ACP concurrency and session handling: concurrent first requests no longer spawn competing agent processes, discovery no longer keeps the event loop alive, a rejected or cancelled turn replays the transcript instead of skipping unsent messages, a changed system prompt or branched transcript starts a fresh ACP session, and an aborted turn is cancelled and settled before its session is dropped
+- Fixed ACP stop reasons other than `end_turn` and the length reasons being reported as a successful completion, and fixed agent text and thinking blocks being reordered relative to each other
 
 ## [1.0.3] - 2026-10-05
 

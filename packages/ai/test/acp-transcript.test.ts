@@ -102,6 +102,59 @@ describe("transcriptToAcpPrompt", () => {
 		expect(blocks[2]).toEqual({ type: "text", text: "Continue" });
 	});
 
+	it("keeps assistant thinking and tool-result images in replayed history", () => {
+		const messages: Message[] = [
+			{
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "considering" },
+					{ type: "text", text: "Done." },
+				],
+				api: "openai-completions",
+				provider: "openai",
+				model: "gpt",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "call_1",
+				toolName: "screenshot",
+				content: [
+					{ type: "text", text: "captured" },
+					{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+				],
+				isError: false,
+				timestamp,
+			},
+		];
+		expect(transcriptToAcpPrompt(messages)).toEqual([
+			{ type: "text", text: "Assistant: Thinking: considering\n\nDone." },
+			{ type: "text", text: "Tool result `screenshot`: captured" },
+			{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+		]);
+		// A text-only agent must not receive image blocks at all.
+		expect(transcriptToAcpPrompt(messages, { supportsImages: false })).toEqual([
+			{ type: "text", text: "Assistant: Thinking: considering\n\nDone." },
+			{ type: "text", text: "Tool result `screenshot`: captured" },
+		]);
+	});
+
+	it("sends the system prompt verbatim but skips a whitespace-only one", () => {
+		expect(transcriptToAcpPrompt([], { systemPrompt: "  padded prompt  " })).toEqual([
+			{ type: "text", text: "  padded prompt  " },
+		]);
+		expect(transcriptToAcpPrompt([], { systemPrompt: "   " })).toEqual([]);
+	});
+
 	it("skips empty user messages", () => {
 		const messages: Message[] = [
 			{ role: "user", content: "   ", timestamp },

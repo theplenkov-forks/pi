@@ -82,6 +82,8 @@ These variables are read by Pi itself:
 | `PI_CODING_AGENT_SESSION_DIR` | Override session storage; overridden by `--session-dir` |
 | `PI_PACKAGE_DIR` | Override the package directory, useful for Nix/Guix store paths |
 | `PI_OFFLINE` | Disable automatic network activity, including model catalog refreshes |
+| `PI_ACP_PROVIDERS` | Opt in to builtin ACP (Agent Client Protocol) agents, e.g. `devin`; comma- or space-separated, or `*` for all. An installed agent is not enabled by default. See [ACP agents](providers.md#acp-agents) |
+| `PI_ACP_LOG` | Set to `1` to print ACP agent stderr and pool diagnostics |
 | `PI_SKIP_VERSION_CHECK` | Disable the `pi.dev` latest-version request |
 | `PI_TELEMETRY` | Override install/update telemetry and provider attribution headers: `1`/`true`/`yes` or `0`/`false`/`no` |
 | `PI_CACHE_RETENTION` | Set to `long` for extended provider prompt caching where supported |

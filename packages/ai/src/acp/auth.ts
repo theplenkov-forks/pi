@@ -127,6 +127,19 @@ function effectivePath(
 }
 
 /**
+ * Builtin ACP agents are opt-in. An installed CLI must not silently add its
+ * model catalog to pi: availability would then depend on which binaries happen
+ * to be on PATH. Enable a builtin provider with `PI_ACP_PROVIDERS=devin`
+ * (comma- or space-separated, or `*`), or by declaring the provider in
+ * `models.json`.
+ */
+export function acpProviderOptIn(providerId: string, env: Record<string, string | undefined> = process.env): boolean {
+	const raw = env.PI_ACP_PROVIDERS;
+	if (!raw) return false;
+	return raw.split(/[,\s]+/).some((entry) => entry.length > 0 && (entry === "*" || entry === providerId));
+}
+
+/**
  * ApiKeyAuth shape for ACP commands (Node runtime; loaded lazily by providers).
  * `getEnv` supplies the configured transport env so a command reachable only
  * through it still counts as configured.
@@ -135,10 +148,12 @@ export function acpCommandAuth(
 	name: string,
 	getCommand: () => string | undefined,
 	getEnv?: () => Record<string, string> | undefined,
+	isEnabled?: () => boolean,
 ): ApiKeyAuth {
+	const enabled = () => isEnabled?.() ?? true;
 	return {
 		name,
-		check: (input) => checkAcpCommand(getCommand(), input, getEnv?.()),
-		resolve: (input) => resolveAcpCommand(getCommand(), input, getEnv?.()),
+		check: async (input) => (enabled() ? checkAcpCommand(getCommand(), input, getEnv?.()) : undefined),
+		resolve: async (input) => (enabled() ? resolveAcpCommand(getCommand(), input, getEnv?.()) : undefined),
 	};
 }

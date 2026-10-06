@@ -208,7 +208,16 @@ devin auth login
 # or: export WINDSURF_API_KEY=...
 ```
 
-Then pick a `devin/…` model in `/model`. The catalog is discovered dynamically from the agent's ACP session config (100+ variants); offline startup keeps the last snapshot, falling back to the model-family baseline. Each model spawns `devin acp --model <id>` with one ACP session per Pi session, so Devin remembers earlier turns. Permission prompts from Devin are auto-approved; file access runs through Pi.
+Then pick a `devin/…` model in `/model`. Devin is opt-in: having the CLI installed is not enough, because an installed agent would otherwise add its whole catalog to every `/model` list on that machine. Enable it once:
+
+```bash
+export PI_ACP_PROVIDERS=devin
+# or declare it in ~/.pi/agent/models.json: { "providers": { "devin": {} } }
+```
+
+`PI_ACP_PROVIDERS` takes a comma- or space-separated list of provider ids, or `*` for every configured ACP agent.
+
+The catalog is discovered dynamically from the agent's ACP session config (100+ variants); offline startup keeps the last snapshot, falling back to the model-family baseline. Each model spawns `devin acp --model <id>` with one ACP session per Pi session, so Devin remembers earlier turns. Permission prompts from Devin are auto-approved; file access runs through Pi.
 
 ### ACP agents
 
@@ -240,6 +249,8 @@ Per-model `args`/`env`/`command` override the provider level, e.g. `"args": ["ac
 ```
 
 The agent owns its tools, plans, and permissions; Pi forwards your messages and renders the agent's replies.
+
+A provider declared in `models.json` is an explicit opt-in and needs no environment variable. For a *builtin* ACP provider (Devin today) set `PI_ACP_PROVIDERS=<id>` instead.
 
 What Pi implements is the client half of ACP 1.x: file read/write access and permission requests, where every request is auto-approved (`allow_once` when the agent offers it). Pi does not expose the terminal capability, so agents that require Pi to run commands on their behalf are not supported.
 

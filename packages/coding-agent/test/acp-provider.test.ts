@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { devinProvider } from "@earendil-works/pi-ai/providers/devin";
 import { afterEach, describe, expect, it } from "vitest";
 import { ModelConfig } from "../src/core/model-config.ts";
@@ -24,6 +24,22 @@ function loadConfig(modelsJson: unknown): Promise<ModelConfig> {
 	const path = join(dir, "models.json");
 	writeFileSync(path, JSON.stringify(modelsJson));
 	return ModelConfig.load(path);
+}
+
+/**
+ * Put a fake `devin` executable first on PATH so availability checks do not
+ * depend on whether the real CLI is installed. Returns a restore function.
+ */
+function withFakeDevinOnPath(): () => void {
+	const dir = mkdtempSync(join(tmpdir(), "acp-bin-"));
+	tempDirs.push(dir);
+	writeFileSync(join(dir, "devin"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+	const previous = process.env.PATH;
+	process.env.PATH = `${dir}${delimiter}${previous ?? ""}`;
+	return () => {
+		if (previous === undefined) delete process.env.PATH;
+		else process.env.PATH = previous;
+	};
 }
 
 describe("ACP models.json support", () => {
@@ -224,6 +240,55 @@ describe("ACP models.json support", () => {
 			args: ["acp", "--model", "swe-2"],
 			env: { DEVIN_PROFILE: "night" },
 		});
+	});
+
+	it("requires an opt-in before a builtin agent counts as configured", async () => {
+		const restorePath = withFakeDevinOnPath();
+		const previous = process.env.PI_ACP_PROVIDERS;
+		delete process.env.PI_ACP_PROVIDERS;
+		try {
+			// No models.json entry and no opt-in: not configured.
+			const ungated = composeModelProvider("devin", devinProvider(), await loadConfig({ providers: {} }), undefined);
+			expect(
+				await ungated.auth.apiKey?.check?.({
+					ctx: { env: async () => undefined, fileExists: async () => false },
+					signal: new AbortController().signal,
+				}),
+			).toBeUndefined();
+			// Opting in via the environment makes the builtin available.
+			process.env.PI_ACP_PROVIDERS = "devin";
+			const optedIn = composeModelProvider("devin", devinProvider(), await loadConfig({ providers: {} }), undefined);
+			expect(
+				await optedIn.auth.apiKey?.check?.({
+					ctx: { env: async () => undefined, fileExists: async () => false },
+					signal: new AbortController().signal,
+				}),
+			).toEqual({ type: "api_key", source: 'ACP command "devin"' });
+		} finally {
+			restorePath();
+			if (previous === undefined) delete process.env.PI_ACP_PROVIDERS;
+			else process.env.PI_ACP_PROVIDERS = previous;
+		}
+	});
+
+	it("treats a models.json entry as an opt-in for a builtin agent", async () => {
+		const restorePath = withFakeDevinOnPath();
+		const previous = process.env.PI_ACP_PROVIDERS;
+		delete process.env.PI_ACP_PROVIDERS;
+		try {
+			const config = await loadConfig({ providers: { devin: { include: ["swe-2"] } } });
+			const provider = composeModelProvider("devin", devinProvider(), config, undefined);
+			expect(
+				await provider.auth.apiKey?.check?.({
+					ctx: { env: async () => undefined, fileExists: async () => false },
+					signal: new AbortController().signal,
+				}),
+			).toEqual({ type: "api_key", source: 'ACP command "devin"' });
+		} finally {
+			restorePath();
+			if (previous === undefined) delete process.env.PI_ACP_PROVIDERS;
+			else process.env.PI_ACP_PROVIDERS = previous;
+		}
 	});
 
 	it("accepts a provider entry that only carries args and env", async () => {

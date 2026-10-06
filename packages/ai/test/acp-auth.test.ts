@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { acpCommandAuth, acpCommandName, findAcpCommand, resolveAcpBinary } from "../src/acp/auth.ts";
+import { acpCommandAuth, acpCommandName, acpProviderOptIn, findAcpCommand, resolveAcpBinary } from "../src/acp/auth.ts";
 
 const tempDirs: string[] = [];
 
@@ -84,6 +84,40 @@ describe("acpCommandName", () => {
 	it("returns the binary basename", () => {
 		expect(acpCommandName("/usr/local/bin/devin")).toBe("devin");
 		expect(acpCommandName("devin")).toBe("devin");
+	});
+});
+
+describe("acpProviderOptIn", () => {
+	it("requires an explicit opt-in for a builtin agent", () => {
+		expect(acpProviderOptIn("devin", {})).toBe(false);
+		expect(acpProviderOptIn("devin", { PI_ACP_PROVIDERS: "devin" })).toBe(true);
+		expect(acpProviderOptIn("devin", { PI_ACP_PROVIDERS: "goose devin" })).toBe(true);
+		expect(acpProviderOptIn("devin", { PI_ACP_PROVIDERS: "goose,other" })).toBe(false);
+		expect(acpProviderOptIn("devin", { PI_ACP_PROVIDERS: "*" })).toBe(true);
+	});
+
+	it("keeps a gated provider unconfigured even when the command resolves", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "acp-auth-"));
+		tempDirs.push(dir);
+		const binary = makeExecutable(dir, "devin");
+		const off = acpCommandAuth(
+			"Devin",
+			() => binary,
+			undefined,
+			() => false,
+		);
+		expect(await off.check?.({ ...testContext(), credential: undefined })).toBeUndefined();
+		expect(await off.resolve?.({ ...testContext(), credential: undefined })).toBeUndefined();
+		const on = acpCommandAuth(
+			"Devin",
+			() => binary,
+			undefined,
+			() => true,
+		);
+		expect(await on.check?.({ ...testContext(), credential: undefined })).toEqual({
+			type: "api_key",
+			source: 'ACP command "devin"',
+		});
 	});
 });
 

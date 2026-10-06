@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added ACP (Agent Client Protocol) providers: any ACP-compatible CLI can be configured as a provider in `models.json` with `command`/`args`/`env` (`"api": "acp"`), per-model overrides, `modelOverrides`, and `include`/`exclude` id filters. Devin ships as a built-in `devin` provider (`devin acp`) with a dynamically discovered model catalog. Authenticate with `devin auth login`, then pick a `devin/…` model in `/model`. See [ACP agents](docs/providers.md#acp-agents) ([#10496](https://github.com/earendil-works/pi/issues/10496)).
+- Added ACP (Agent Client Protocol) providers: any ACP-compatible CLI can be configured as a provider in `models.json` with `command`/`args`/`env` (`"api": "acp"`), per-model overrides, `modelOverrides`, and `include`/`exclude` id filters. Devin ships as a built-in `devin` provider (`devin acp`) with a dynamically discovered model catalog. Builtin ACP agents are opt-in via `PI_ACP_PROVIDERS=devin` or a `models.json` entry, so an installed CLI never adds its catalog on its own. Authenticate with `devin auth login`, then pick a `devin/…` model in `/model`. See [ACP agents](docs/providers.md#acp-agents) ([#10496](https://github.com/earendil-works/pi/issues/10496)).
 
 ### Fixed
 

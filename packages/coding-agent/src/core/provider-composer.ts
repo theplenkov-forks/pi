@@ -28,6 +28,7 @@ import {
 	type StreamOptions,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
+import { acpProviderOptIn } from "@earendil-works/pi-ai/acp/auth";
 import { acpCommandAuth } from "@earendil-works/pi-ai/acp/provider";
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { classifierErrorResult, imageErrorResult } from "@earendil-works/pi-ai/utils/model-operations";
@@ -619,18 +620,6 @@ function rawModelHeaders(
 	return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
-/** ACP command explicitly configured in models.json, ignoring inherited models. */
-function acpConfiguredCommand(config: ModelsJsonProvider | undefined): string | undefined {
-	if (config?.command) return config.command;
-	for (const definition of config?.models ?? []) {
-		if (definition.command) return definition.command;
-	}
-	for (const override of Object.values(config?.modelOverrides ?? {})) {
-		if (override.command) return override.command;
-	}
-	return undefined;
-}
-
 /** First ACP command visible for a provider: provider-level, model-level, overrides, then base models. */
 function acpProviderCommand(base: Provider | undefined, config: ModelsJsonProvider | undefined): string | undefined {
 	if (config?.command) return config.command;
@@ -735,15 +724,14 @@ export function composeModelProvider(
 	getAllModels();
 	const displayName = extension?.name ?? config?.name ?? base?.name ?? extension?.oauth?.name ?? providerId;
 	let apiKey: ApiKeyAuth | undefined;
-	// A models.json command replaces the builtin's, so it must also replace the
-	// inherited command auth — otherwise the old command gates availability.
-	const configuredCommand = acpConfiguredCommand(config);
-	const baseCommand = getAllProviderModels(base).find((model) => model.api === "acp")?.acp?.command;
-	const overridesBaseCommand = configuredCommand !== undefined && configuredCommand !== baseCommand;
+	// Any models.json entry for an ACP provider is an explicit opt-in, so the
+	// composer owns its command auth here. Without an entry the builtin's auth is
+	// inherited, including its opt-in gate: a CLI installed on PATH must not add
+	// its model catalog on its own.
 	if (
 		usesAcpTransport(base, config) &&
 		configuredApiKey(config, extension) === undefined &&
-		(overridesBaseCommand || !base?.auth.apiKey)
+		(config !== undefined || !base?.auth.apiKey)
 	) {
 		const command = acpProviderCommand(base, config);
 		if (command) {
@@ -751,6 +739,7 @@ export function composeModelProvider(
 				displayName,
 				() => acpProviderCommand(base, config),
 				() => acpProviderEnv(config),
+				() => config !== undefined || acpProviderOptIn(providerId),
 			);
 		}
 	}

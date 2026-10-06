@@ -16,6 +16,13 @@ import { type AcpTransportConfig, acpBaseUrl, resolveAcpTransport } from "./type
 
 type AcpAuthModule = typeof import("./auth.ts");
 
+/** Opt-in check for builtin ACP providers; mirrors `acpProviderOptIn` in auth.ts. */
+function acpProviderOptIn(providerId: string): boolean {
+	const raw = process.env.PI_ACP_PROVIDERS;
+	if (!raw) return false;
+	return raw.split(/[,\s]+/).some((entry) => entry.length > 0 && (entry === "*" || entry === providerId));
+}
+
 const importNodeOnlyAuth = (specifier: string): Promise<AcpAuthModule> => {
 	const runtimeSpecifier = import.meta.url.endsWith(".js") ? specifier.replace(/\.ts$/, ".js") : specifier;
 	return import(runtimeSpecifier) as Promise<AcpAuthModule>;
@@ -38,22 +45,30 @@ async function loadAuthModule(): Promise<AcpAuthModule | undefined> {
 	}
 }
 
-/** Command-based auth with a lazily loaded binary check. No login flow. */
+/**
+ * Command-based auth with a lazily loaded binary check. No login flow.
+ * `isEnabled` gates the builtin opt-in: without it the provider is registered
+ * but never reported as configured.
+ */
 export function acpCommandAuth(
 	name: string,
 	getCommand: () => string | undefined,
 	getEnv?: () => Record<string, string> | undefined,
+	isEnabled?: () => boolean,
 ): ApiKeyAuth {
+	const enabled = () => isEnabled?.() ?? true;
 	return {
 		name,
 		check: async (input) => {
 			input.signal.throwIfAborted();
+			if (!enabled()) return undefined;
 			const module = await loadAuthModule();
 			if (!module) return undefined;
 			return module.checkAcpCommand(getCommand(), input, getEnv?.());
 		},
 		resolve: async (input) => {
 			input.signal.throwIfAborted();
+			if (!enabled()) return undefined;
 			const module = await loadAuthModule();
 			if (!module) return undefined;
 			return module.resolveAcpCommand(getCommand(), input, getEnv?.());
@@ -88,6 +103,11 @@ export interface AcpProviderOptions {
 	 * restores the persisted snapshot offline and publishes fetched models.
 	 */
 	fetchModels?: (context: RefreshModelsContext) => Promise<readonly Model<"acp">[]>;
+	/**
+	 * Whether the provider counts as configured. Defaults to
+	 * {@link acpProviderOptIn}: an installed CLI alone does not add its catalog.
+	 */
+	isEnabled?: () => boolean;
 	/**
 	 * Treat `models` as an offline fallback when `fetchModels` is set: the agent
 	 * advertises the authoritative catalog, so a successful refresh replaces the
@@ -139,6 +159,7 @@ export function createAcpProvider(options: AcpProviderOptions): Provider<"acp"> 
 				options.name ?? options.id,
 				() => transport.command,
 				() => transport.env,
+				options.isEnabled ?? (() => acpProviderOptIn(options.id)),
 			),
 		},
 		models: options.models.map((definition) => acpChatModel(options.id, transport, definition, options.defaults)),

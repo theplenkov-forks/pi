@@ -147,6 +147,10 @@ const ModelCostSchema = Type.Object({
 	...ModelCostRatesSchema,
 	tiers: Type.Optional(Type.Array(ModelCostTierSchema)),
 });
+/** ACP subprocess transport (`command` + `args` + `env`, Zed-style). */
+const AcpCommandSchema = Type.String({ minLength: 1 });
+const AcpArgsSchema = Type.Array(Type.String());
+const AcpEnvSchema = Type.Record(Type.String(), Type.String());
 const ModelPromptCacheSchema = Type.Object({
 	short: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
 	long: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
@@ -201,6 +205,9 @@ const ModelDefinitionSchema = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1 })),
 	api: Type.Optional(Type.String({ minLength: 1 })),
 	baseUrl: Type.Optional(Type.String({ minLength: 1 })),
+	command: Type.Optional(AcpCommandSchema),
+	args: Type.Optional(AcpArgsSchema),
+	env: Type.Optional(AcpEnvSchema),
 	reasoning: Type.Optional(Type.Boolean()),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
@@ -217,6 +224,9 @@ const ModelDefinitionSchema = Type.Object({
 
 const ModelOverrideSchema = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1 })),
+	command: Type.Optional(AcpCommandSchema),
+	args: Type.Optional(AcpArgsSchema),
+	env: Type.Optional(AcpEnvSchema),
 	reasoning: Type.Optional(Type.Boolean()),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
@@ -242,6 +252,11 @@ const ModelOverrideSchema = Type.Object({
 const ProviderConfigSchema = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1 })),
 	baseUrl: Type.Optional(Type.String({ minLength: 1 })),
+	command: Type.Optional(AcpCommandSchema),
+	args: Type.Optional(AcpArgsSchema),
+	env: Type.Optional(AcpEnvSchema),
+	include: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+	exclude: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
 	apiKey: Type.Optional(Type.String({ minLength: 1 })),
 	api: Type.Optional(Type.String({ minLength: 1 })),
 	oauth: Type.Optional(Type.Literal("radius")),

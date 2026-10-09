@@ -126,6 +126,23 @@ Pi first clamps unsupported thinking levels, then merges model `samplingParams`,
 
 Compatibility settings should describe verified differences in the endpoint's request or response behavior. Do not enable them based only on an endpoint advertising OpenAI or Anthropic compatibility.
 
+## Connect ACP agents
+
+For CLIs that speak the Agent Client Protocol (Devin, Gemini CLI with ACP mode, custom agents), configure the command instead of a URL. See [ACP agents](providers.md#acp-agents).
+
+```json
+{
+  "providers": {
+    "my-agent": {
+      "command": "my-agent",
+      "args": ["acp"],
+      "api": "acp",
+      "models": [{ "id": "default" }]
+    }
+  }
+}
+```
+
 ## Use classifier models
 
 Classifier models do not chat. They answer typed questions about JSON state: pick one of several choices, answer yes or no, or give a score, each with probabilities. Pi includes TypeSafe's Jev model from these providers, and Cloudflare's Clef and Clef Flash models from Workers AI:

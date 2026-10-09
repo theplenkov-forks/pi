@@ -6,12 +6,14 @@ import {
 	type AuthContext,
 	type AuthInteraction,
 	type AuthResult,
+	acpBaseUrl,
 	type ClassifierApi,
 	type Credential,
 	type ImageApi,
 	isModelType,
 	lazyStream,
 	type Model,
+	type ModelAcpTransport,
 	type ModelAuth,
 	type OAuthAuth,
 	type OAuthCredentials,
@@ -21,10 +23,13 @@ import {
 	type ProviderHeaders,
 	type ProviderImages,
 	type RefreshModelsContext,
+	resolveAcpTransport,
 	type SimpleStreamOptions,
 	type StreamOptions,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
+import { acpProviderOptIn } from "@earendil-works/pi-ai/acp/auth";
+import { acpCommandAuth } from "@earendil-works/pi-ai/acp/provider";
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import { classifierErrorResult, imageErrorResult } from "@earendil-works/pi-ai/utils/model-operations";
 import type { ModelConfig, ModelsJsonModel, ModelsJsonModelOverride, ModelsJsonProvider } from "./model-config.ts";
@@ -175,8 +180,23 @@ function mergeSamplingParamsByThinkingLevel(
 }
 
 function applyModelOverride(model: Model<Api>, override: ModelsJsonModelOverride): Model<Api> {
+	// An override only builds a transport when the model already has one, or when
+	// the override supplies the command. `env`/`args` alone would otherwise attach
+	// a command-less ACP transport and fail at request time with a misleading
+	// missing-command error.
+	const acp =
+		model.acp !== undefined &&
+		(override.command !== undefined || override.args !== undefined || override.env !== undefined)
+			? {
+					...model.acp,
+					...(override.command !== undefined ? { command: override.command } : {}),
+					...(override.args !== undefined ? { args: override.args } : {}),
+					...(override.env !== undefined ? { env: { ...model.acp?.env, ...override.env } } : {}),
+				}
+			: model.acp;
 	return {
 		...model,
+		...(acp !== undefined ? { acp } : {}),
 		name: override.name ?? model.name,
 		reasoning: override.reasoning ?? model.reasoning,
 		thinkingLevelMap: override.thinkingLevelMap
@@ -220,7 +240,9 @@ function modelFromJson(
 		);
 	}
 	const baseUrl = definition.baseUrl ?? providerConfig.baseUrl ?? defaults?.baseUrl;
-	if (!baseUrl) throw new Error(`Provider ${providerId}: "baseUrl" is required when defining custom models.`);
+	const isAcp = (definition.api ?? providerConfig.api ?? defaults?.api) === "acp";
+	if (!baseUrl && !isAcp)
+		throw new Error(`Provider ${providerId}: "baseUrl" is required when defining custom models.`);
 	if (definition.contextWindow !== undefined && definition.contextWindow <= 0) {
 		throw new Error(`Provider ${providerId}, model ${definition.id}: invalid contextWindow`);
 	}
@@ -232,7 +254,7 @@ function modelFromJson(
 		name: definition.name ?? definition.id,
 		api: api as Api,
 		provider: providerId,
-		baseUrl,
+		baseUrl: baseUrl ?? acpBaseUrl(providerId),
 		reasoning: definition.reasoning ?? false,
 		thinkingLevelMap: definition.thinkingLevelMap,
 		input: (definition.input ?? ["text"]) as ("text" | "image")[],
@@ -245,7 +267,46 @@ function modelFromJson(
 		samplingParamsByThinkingLevel: definition.samplingParamsByThinkingLevel,
 		headers: undefined,
 		compat: mergeCompat(providerConfig.compat, definition.compat),
+		...acpTransportFromJson(providerId, definition, providerConfig, defaults),
 	};
+}
+
+function acpTransportFromJson(
+	providerId: string,
+	definition: ModelsJsonModel,
+	providerConfig: ModelsJsonProvider,
+	defaults: Model<Api> | undefined,
+): { acp?: Model<Api>["acp"] } {
+	// `defaults` is the matching known model, so an overlay that only renames a
+	// built-in ACP model keeps its api and command transport.
+	const api = definition.api ?? providerConfig.api ?? defaults?.api;
+	if (
+		api !== "acp" &&
+		definition.command === undefined &&
+		definition.args === undefined &&
+		definition.env === undefined
+	) {
+		return {};
+	}
+	if (api !== "acp") {
+		throw new Error(`Provider ${providerId}, model ${definition.id}: "command"/"args"/"env" require "api": "acp".`);
+	}
+	// Provider-level settings layer over the known model's transport so `env`
+	// and `args` apply even when only the command comes from the builtin.
+	const providerTransport: ModelAcpTransport = {
+		command: providerConfig.command ?? defaults?.acp?.command,
+		args: providerConfig.args ?? defaults?.acp?.args,
+		env: { ...defaults?.acp?.env, ...providerConfig.env },
+	};
+	const resolved = resolveAcpTransport(providerTransport, {
+		command: definition.command,
+		args: definition.args,
+		env: definition.env,
+	});
+	if (!resolved) {
+		throw new Error(`Provider ${providerId}, model ${definition.id}: "command" is required for ACP models.`);
+	}
+	return { acp: resolved };
 }
 
 function findModelDefaults(models: readonly AnyModel[], modelId: string, api?: Api): Model<Api> | undefined {
@@ -261,12 +322,15 @@ function findModelDefaults(models: readonly AnyModel[], modelId: string, api?: A
 function findExtensionModelDefaults(
 	models: readonly AnyModel[],
 	definition: ProviderModelConfig,
+	providerApi?: Api,
 ): AnyModel | undefined {
 	const type = definition.type ?? "chat";
+	const effectiveApi = definition.api ?? providerApi;
 	const candidates = models.filter((model) => isModelType(model, type));
 	return (
+		candidates.find((model) => model.id === definition.id && (!effectiveApi || model.api === effectiveApi)) ??
+		(effectiveApi ? candidates.find((model) => model.api === effectiveApi) : undefined) ??
 		candidates.find((model) => model.id === definition.id) ??
-		(definition.api ? candidates.find((model) => model.api === definition.api) : undefined) ??
 		(type === "chat" ? candidates.find((model) => model.api === "openai-completions") : undefined) ??
 		candidates[0]
 	);
@@ -279,8 +343,11 @@ function extensionModelFromDefinition(
 	definition: ProviderModelConfig,
 ): AnyModel {
 	const type = definition.type ?? "chat";
-	const defaults = findExtensionModelDefaults(models, definition);
-	const api = definition.api ?? (type === "chat" ? config.api : undefined) ?? defaults?.api;
+	const providerApi = type === "chat" ? config.api : undefined;
+	// Provider-level `api: "acp"` decides the api even when the candidate default
+	// matches by id only, so select defaults against the effective api.
+	const defaults = findExtensionModelDefaults(models, definition, providerApi);
+	const api = definition.api ?? providerApi ?? defaults?.api;
 	if (!api) {
 		throw new Error(
 			`Provider ${providerId}, model ${definition.id}: no "api" specified. Set it at model level${type === "chat" ? " or provider level" : ""}.`,
@@ -288,13 +355,15 @@ function extensionModelFromDefinition(
 	}
 	const baseUrl = definition.baseUrl ?? config.baseUrl ?? defaults?.baseUrl;
 	if (!baseUrl) throw new Error(`Provider ${providerId}: "baseUrl" is required when defining custom models.`);
+	// Extension registrations carry no ACP transport; ACP models keep the base model's transport.
+	const inheritedAcp = api === "acp" && defaults && "acp" in defaults ? { acp: defaults.acp } : {};
 	if (definition.type === "image") {
 		return { ...definition, api: api as ImageApi, provider: providerId, baseUrl, headers: undefined };
 	}
 	if (definition.type === "classifier") {
 		return { ...definition, api: api as ClassifierApi, provider: providerId, baseUrl, headers: undefined };
 	}
-	return { ...definition, api: api as Api, provider: providerId, baseUrl, headers: undefined };
+	return { ...definition, api: api as Api, provider: providerId, baseUrl, headers: undefined, ...inheritedAcp };
 }
 
 function applyModelsJson(
@@ -310,23 +379,44 @@ function applyModelsJson(
 	if (
 		!config.models?.length &&
 		!config.baseUrl &&
+		!config.command &&
+		!config.args?.length &&
+		!config.env &&
 		!config.headers &&
 		!config.compat &&
 		!hasOverrides &&
 		!config.apiKey &&
 		!config.oauth &&
+		!config.include?.length &&
+		!config.exclude?.length &&
 		config.authHeader === undefined
 	) {
 		throw new Error(
-			`Provider ${providerId}: must specify "baseUrl", "headers", "compat", "modelOverrides", or "models".`,
+			`Provider ${providerId}: must specify "baseUrl", "command", "args", "env", "headers", "compat", "modelOverrides", "include"/"exclude", or "models".`,
 		);
 	}
 
 	const models: AnyModel[] = baseModels.map((model) => {
 		const baseUrl = config.oauth === "radius" ? model.baseUrl : (config.baseUrl ?? model.baseUrl);
-		return isModelType(model, "chat")
-			? { ...model, baseUrl, compat: mergeCompat(model.compat, config.compat) }
-			: { ...model, baseUrl };
+		if (!isModelType(model, "chat")) return { ...model, baseUrl };
+		// Provider-level ACP settings apply to inherited models too, otherwise a
+		// `command`/`env` override on a builtin provider would only affect models
+		// the entry re-declares. `args` stay per model: they select the variant.
+		const acp =
+			model.api === "acp" && (config.command !== undefined || config.env !== undefined)
+				? resolveAcpTransport(
+						{ ...model.acp, env: { ...model.acp?.env, ...config.env } },
+						{
+							command: config.command,
+						},
+					)
+				: model.acp;
+		return {
+			...model,
+			baseUrl,
+			compat: mergeCompat(model.compat, config.compat),
+			...(acp ? { acp } : {}),
+		};
 	});
 	for (const definition of config.models ?? []) {
 		const existingIndex = models.findIndex((model) => isModelType(model, "chat") && model.id === definition.id);
@@ -429,12 +519,16 @@ function composeApiKeyAuth(
 	const authHeader = extension?.authHeader ?? config?.authHeader ?? false;
 	return {
 		name: inherited?.name ?? "API key",
+		// An inherited auth without a login (e.g. ACP command auth) stays
+		// login-free; only key-based setups get the API-key prompt fallback.
 		login:
 			inherited?.login ??
-			(async (interaction: AuthInteraction) => ({
-				type: "api_key",
-				key: await interaction.prompt({ type: "secret", message: "Enter API key" }),
-			})),
+			(inherited
+				? undefined
+				: async (interaction: AuthInteraction) => ({
+						type: "api_key",
+						key: await interaction.prompt({ type: "secret", message: "Enter API key" }),
+					})),
 		check: async (input) => {
 			if (input.credential) {
 				if (inherited?.check) return inherited.check(input);
@@ -526,6 +620,40 @@ function rawModelHeaders(
 	return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
+/** First ACP command visible for a provider: provider-level, model-level, overrides, then base models. */
+function acpProviderCommand(base: Provider | undefined, config: ModelsJsonProvider | undefined): string | undefined {
+	if (config?.command) return config.command;
+	for (const definition of config?.models ?? []) {
+		if (definition.command) return definition.command;
+	}
+	// modelOverrides replace a model's transport, so an override command wins over
+	// the base model's command.
+	for (const model of getAllProviderModels(base)) {
+		if (model.api !== "acp") continue;
+		const override = config?.modelOverrides?.[model.id];
+		if (override?.command) return override.command;
+		if (model.acp?.command) return model.acp.command;
+	}
+	return undefined;
+}
+
+/** Transport env configured for a provider: provider level, then any model entry. */
+function acpProviderEnv(config: ModelsJsonProvider | undefined): Record<string, string> | undefined {
+	if (config?.env) return config.env;
+	for (const definition of config?.models ?? []) {
+		if (definition.env) return definition.env;
+	}
+	return undefined;
+}
+
+/** Whether a provider serves ACP models from any layer. */
+function usesAcpTransport(base: Provider | undefined, config: ModelsJsonProvider | undefined): boolean {
+	if (config?.command || (config?.models ?? []).some((definition) => (definition.api ?? config?.api) === "acp")) {
+		return true;
+	}
+	return getAllProviderModels(base).some((model) => model.api === "acp");
+}
+
 export function validateExtensionProvider(
 	providerId: string,
 	base: Provider | undefined,
@@ -539,6 +667,19 @@ export function validateExtensionProvider(
 }
 
 /** Compose built-in, models.json, and extension layers without reading credentials. */
+/** Case-insensitive substring filter over model ids. Include narrows first, exclude removes after. */
+function acpModelFilter(config: ModelsJsonProvider | undefined): ((id: string) => boolean) | undefined {
+	const include = config?.include?.filter((pattern) => pattern.length > 0);
+	const exclude = config?.exclude?.filter((pattern) => pattern.length > 0);
+	if (!include?.length && !exclude?.length) return undefined;
+	return (id: string) => {
+		const lower = id.toLowerCase();
+		if (include?.length && !include.some((pattern) => lower.includes(pattern.toLowerCase()))) return false;
+		if (exclude?.some((pattern) => lower.includes(pattern.toLowerCase()))) return false;
+		return true;
+	};
+}
+
 export function composeModelProvider(
 	providerId: string,
 	base: Provider | undefined,
@@ -546,6 +687,12 @@ export function composeModelProvider(
 	extension: ProviderConfigInput | undefined,
 ): Provider {
 	const config = modelConfig.getProvider(providerId);
+	// Model-level commands count too: a Radius-oauth provider must not be able to
+	// route some of its models through an ACP subprocess.
+	const hasCommand = config?.command !== undefined || config?.models?.some((model) => model.command !== undefined);
+	if (hasCommand && config?.oauth) {
+		throw new Error(`Provider ${providerId}: "command" (ACP) cannot be combined with "oauth".`);
+	}
 	let extensionOAuthCredential: OAuthCredentials | undefined;
 	let refreshedExtensionModels: ProviderConfigInput["models"];
 	const currentExtension = (): ProviderConfigInput | undefined =>
@@ -575,7 +722,28 @@ export function composeModelProvider(
 	};
 	// Validate eagerly so registration/reload reports structural errors immediately.
 	getAllModels();
-	const apiKey = composeApiKeyAuth(providerId, base, config, extension);
+	const displayName = extension?.name ?? config?.name ?? base?.name ?? extension?.oauth?.name ?? providerId;
+	let apiKey: ApiKeyAuth | undefined;
+	// Any models.json entry for an ACP provider is an explicit opt-in, so the
+	// composer owns its command auth here. Without an entry the builtin's auth is
+	// inherited, including its opt-in gate: a CLI installed on PATH must not add
+	// its model catalog on its own.
+	if (
+		usesAcpTransport(base, config) &&
+		configuredApiKey(config, extension) === undefined &&
+		(config !== undefined || !base?.auth.apiKey)
+	) {
+		const command = acpProviderCommand(base, config);
+		if (command) {
+			apiKey = acpCommandAuth(
+				displayName,
+				() => acpProviderCommand(base, config),
+				() => acpProviderEnv(config),
+				() => config !== undefined || acpProviderOptIn(providerId),
+			);
+		}
+	}
+	apiKey ??= composeApiKeyAuth(providerId, base, config, extension);
 	const oauth = composeOAuthAuth(providerId, base, config, extension);
 	if (!apiKey && !oauth) throw new Error(`Provider ${providerId}: no authentication method configured.`);
 
@@ -604,7 +772,7 @@ export function composeModelProvider(
 
 	const provider: Provider = {
 		id: providerId,
-		name: extension?.name ?? config?.name ?? base?.name ?? extension?.oauth?.name ?? providerId,
+		name: displayName,
 		baseUrl: extension?.baseUrl ?? config?.baseUrl ?? base?.baseUrl,
 		headers: base?.headers,
 		auth: { ...(apiKey ? { apiKey } : {}), ...(oauth ? { oauth } : {}) },
@@ -642,6 +810,18 @@ export function composeModelProvider(
 		stream: (model, context, options) => streamWith(model, context, options, false),
 		streamSimple: (model, context, options) => streamWith(model, context, options, true),
 	};
+
+	const filter = acpModelFilter(config);
+	if (filter) {
+		if (!usesAcpTransport(base, config)) {
+			throw new Error(`Provider ${providerId}: "include"/"exclude" require an ACP provider.`);
+		}
+		// View-layer filter: the persisted snapshot stays complete, reads are narrowed.
+		const unfilteredAll = provider.getAllModels?.bind(provider) ?? (() => getAllModels());
+		const unfilteredChat = provider.getModels.bind(provider);
+		provider.getAllModels = () => unfilteredAll().filter((model) => filter(model.id));
+		provider.getModels = () => unfilteredChat().filter((model) => filter(model.id));
+	}
 
 	const fetchDeferred = base?.fetchDeferred;
 	if (fetchDeferred) {

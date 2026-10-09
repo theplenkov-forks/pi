@@ -1009,6 +1009,13 @@ export interface CreateProviderOptions<TApi extends Api = Api> {
 	 * publishes it transactionally and drops models of unknown types.
 	 */
 	fetchModels?: (context: RefreshModelsContext) => Promise<readonly ProviderModel<TApi>[]>;
+	/**
+	 * Treat `models` as an offline fallback only: once a dynamic catalog is
+	 * restored or fetched, it replaces the baseline instead of merging with it.
+	 * For providers whose advertised catalog is authoritative (e.g. an ACP agent
+	 * that lists the models it actually serves).
+	 */
+	replaceBaselineOnDynamicCatalog?: boolean;
 	/** Credential-specific chat model availability. See `Provider.filterModels`. */
 	filterModels?: (models: readonly Model<TApi>[], credential: Credential | undefined) => readonly Model<TApi>[];
 	/** Credential-specific availability across every model type. See `Provider.filterAllModels`. */
@@ -1055,6 +1062,9 @@ export function createProvider<TApi extends Api = Api>(input: CreateProviderOpti
 	let dynamicModels: readonly ProviderModel<TApi>[] = [];
 	const fetchModels = input.fetchModels;
 	const currentModels = (): readonly ProviderModel<TApi>[] => {
+		// With an authoritative dynamic catalog, the baseline is only used until
+		// the first successful restore or fetch.
+		if (input.replaceBaselineOnDynamicCatalog && dynamicModels.length > 0) return [...dynamicModels];
 		const merged = [...baselineModels];
 		for (const model of dynamicModels) {
 			const index = merged.findIndex(

@@ -2,9 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ACP (Agent Client Protocol) providers: any ACP-compatible CLI can be configured as a provider in `models.json` with `command`/`args`/`env`, and Devin ships as a built-in `devin` provider (`devin acp`) with a dynamically discovered model catalog (ACP session config; family-slug baseline offline). Builtin ACP agents count as configured only after an opt-in (`PI_ACP_PROVIDERS=devin` or a `models.json` entry). Pi spawns the agent, keeps one ACP session per Pi session, and renders agent text, thoughts, tool activity, and usage as a normal model stream ([#10496](https://github.com/earendil-works/pi/issues/10496)).
+
 ### Fixed
 
 - Fixed Bedrock requests that fail with `The pending stream has been canceled` after a stalled HTTP/2 connection not being retried automatically ([#10379](https://github.com/earendil-works/pi/issues/10379))
+- Fixed ACP agent commands given as a working-directory-relative path (`./tools/agent`) failing to spawn even though auth reported the provider as configured
+- Fixed ACP transcript conversion reordering interleaved text and image parts, dropping assistant thinking and tool-result images from replayed history, and sending image blocks to text-only agents
+- Fixed ACP concurrency and session handling: concurrent first requests no longer spawn competing agent processes, discovery no longer keeps the event loop alive, a rejected or cancelled turn replays the transcript instead of skipping unsent messages, a changed system prompt or branched transcript starts a fresh ACP session, and an aborted turn is cancelled and settled before its session is dropped
+- Fixed ACP stop reasons other than `end_turn` and the length reasons being reported as a successful completion, and fixed agent text and thinking blocks being reordered relative to each other
+- Fixed ACP agents on Windows failing to launch from `.cmd`/`.bat` shims or bare names: the resolved binary is spawned, and command shims run through `cmd.exe`
+- Fixed one concurrent ACP turn's abort cancelling another turn's permission requests on the same connection, and fixed a branched or edited ACP transcript reusing a stale session prefix
+- Fixed ACP error labels and debug logs echoing argument values that can contain secrets, keeping only flag names
+- Fixed an ACP turn the agent cancelled itself being reported as an aborted request, and fixed agent thought chunks being separated by inserted newlines
+- Fixed ACP tool results whose only content is an image losing their tool context, and fixed the fake ACP test agent reporting per-process instead of per-session usage
 
 ## [1.0.3] - 2026-10-05
 

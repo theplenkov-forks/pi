@@ -198,3 +198,75 @@ gcloud auth application-default login
 ```
 
 To use a service-account key file instead, set `GOOGLE_APPLICATION_CREDENTIALS` along with the project and location.
+
+### Devin
+
+Devin runs through the Agent Client Protocol: Pi spawns `devin acp` and talks to it like Zed does. Authenticate once outside Pi:
+
+```bash
+devin auth login
+# or: export WINDSURF_API_KEY=...
+```
+
+Then pick a `devin/…` model in `/model`. Devin is opt-in: having the CLI installed is not enough, because an installed agent would otherwise add its whole catalog to every `/model` list on that machine. Enable it once:
+
+```bash
+export PI_ACP_PROVIDERS=devin
+# or declare it in ~/.pi/agent/models.json: { "providers": { "devin": {} } }
+```
+
+`PI_ACP_PROVIDERS` takes a comma- or space-separated list of provider ids, or `*` for every configured ACP agent.
+
+The catalog is discovered dynamically from the agent's ACP session config (100+ variants); offline startup keeps the last snapshot, falling back to the model-family baseline. Each model spawns `devin acp --model <id>` with one ACP session per Pi session, so Devin remembers earlier turns. Permission prompts from Devin are auto-approved; file access runs through Pi.
+
+### ACP agents
+
+Any CLI that speaks the Agent Client Protocol over stdio works as a generic provider. Configure it in `models.json` with a `command` plus optional `args` and `env` (Zed-style `agent_servers`):
+
+```json
+{
+  "providers": {
+    "my-agent": {
+      "command": "my-agent",
+      "args": ["acp"],
+      "api": "acp",
+      "models": [{ "id": "default" }]
+    }
+  }
+}
+```
+
+Per-model `args`/`env`/`command` override the provider level, e.g. `"args": ["acp", "--model", "opus"]` for a second Devin model:
+
+```json
+{
+  "providers": {
+    "devin": {
+      "models": [{ "id": "opus", "api": "acp", "args": ["acp", "--model", "opus"] }]
+    }
+  }
+}
+```
+
+The agent owns its tools, plans, and permissions; Pi forwards your messages and renders the agent's replies.
+
+A provider declared in `models.json` is an explicit opt-in and needs no environment variable. For a *builtin* ACP provider (Devin today) set `PI_ACP_PROVIDERS=<id>` instead.
+
+What Pi implements is the client half of ACP 1.x: file read/write access and permission requests, where every request is auto-approved (`allow_once` when the agent offers it). Pi does not expose the terminal capability, so agents that require Pi to run commands on their behalf are not supported.
+
+Narrow a noisy catalog with case-insensitive substring filters on model IDs (ACP providers only; the persisted snapshot stays complete, reads are filtered):
+
+```json
+{
+  "providers": {
+    "devin": {
+      "exclude": ["fusion-"],
+      "models": [{ "id": "opus", "api": "acp", "args": ["acp", "--model", "opus"] }]
+    }
+  }
+}
+```
+
+`include` keeps only matching IDs, `exclude` drops them. There is no cost-based filter: ACP reports no pricing, so costs default to zero unless you set a `cost` on the model in `models.json`. A turn total appears only when the agent reports cumulative USD cost.
+
+A missing `command` binary makes the provider unavailable: it does not appear as configured in `/model`, and requests report that the provider is not configured. Check the spelling, or point `command` at an absolute or working-directory-relative path (`"/opt/my-agent/acp"`, `"./tools/my-agent"`).
